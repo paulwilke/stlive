@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.8.3 – runnable documentation and live-object guidance
+- Reorganize the README around installation, first use and a documentation map; move project workflows, lifecycle, compatibility and recovery details into dedicated guides.
+- Add a complete counter repair tutorial and a method-addition example on the same existing object, including actual shortened responses, identity/state checks, regression testing and exported-source verification. The tutorial was executed with Pharo 13 in a disposable instance.
+- Clarify attach prerequisites, template dependencies, output exceptions, timeout units and test results where `ok: true` can coexist with failing tests.
+- Incorporate observed agent pitfalls: inspect real selectors, do not assume getters for instance variables, check original and edge cases, preserve supplied objects, and change strategy after failed calls. No general improvement in model success rate is claimed.
+- Make command-reference generation fail clearly when the release binary is missing. Runtime commands and response schemas are unchanged.
+
 ## 0.8.2 – compact skill and honest verification wording
 Documentation and skill only; commands, options and response formats are unchanged.
 - **The skill is split**: `skill/SKILL.md` is a compact entry point (a small command set, instance vs class side, a repair loop, an evidence-based finish); setup, reload behaviour, objects, traits, GUI work, export, exit codes and troubleshooting moved to `skill/references/workflows.md`, read only when needed. **Install the whole directory**: `cp -R skill/. ~/.claude/skills/stlive/` – copying only `SKILL.md` loses the reference.

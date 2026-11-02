@@ -1,6 +1,8 @@
 # Command reference
 
-Generated from `stlive --help` (`scripts/gen-reference.sh`). Every command prints JSON unless `--text` is given.
+Generated from `stlive --help` (`scripts/gen-reference.sh`). Most request commands print JSON unless `--text` is given. `run` prints the program result; `changes watch` streams JSON lines; help/version print text.
+
+[Documentation home](../README.md#documentation) · [Getting started](getting-started.md) · [Output and exit codes](operations.md#output-and-exit-codes)
 
 ```
 Work inside a live Pharo image: eval, inspect, debug, fix, re-run.
