@@ -5,7 +5,7 @@ description: Work inside a running Pharo (Smalltalk) image with the `stlive` CLI
 
 # ST Live: compact working loop
 
-Use the existing project instance and baseline. Do not restart a shared image or reload files over unsaved live changes without coordinating with its owner. Each command returns JSON with `ok`; read the actual result before choosing the next action.
+Use the existing project instance and baseline. Do not restart a shared image or reload files over unsaved live changes without coordinating with its owner. Live request commands return JSON with `ok`; read the actual result before choosing the next action.
 
 ## Start with these operations
 
