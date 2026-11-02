@@ -5,7 +5,7 @@
 - run code and, when it crashes, **keep the crashed program alive** instead of getting a wall of text,
 - **look around** in it, step by step: which call failed, what were the variables, what does that object contain,
 - **fix the method right there**, without restarting anything,
-- **run the operation again**, run the tests, and
+- **run the operation again**, verify its behavior with tests, and
 - **write the fix back** into your source files as a small, clean `git diff`.
 
 Normally an agent edits files, restarts the program and reads a log. Smalltalk can do much better because the program *is* the development environment – `stlive` hands that ability to the agent.
@@ -19,7 +19,7 @@ Normally an agent edits files, restarts the program and reads a log. Smalltalk c
 | look at an object and what it points to | `stlive obj show obj-…`, `stlive obj graph obj-… --depth 3` |
 | try an idea inside the failing method's context | `stlive debug eval dbg-… --frame 3 'sum + 1'` |
 | fix a method in the running app | `stlive method compile Cart --file total.st` |
-| prove the fix, not just hope | `stlive debug rerun dbg-…` (runs the original operation again with the new code) |
+| repeat the failing operation with the changed code | `stlive debug rerun dbg-…` (same image and object state; verify behavior with tests) |
 | run tests and see failures *grouped by cause* | `stlive test run MyApp-Tests` |
 | get the fix into my git repo | `stlive save --package MyApp --dir src --verify` |
 | check that image and files agree | `stlive drift --all --dir src` |
@@ -58,13 +58,13 @@ The crashed run stays in the image as a **debug session** (`dbg-3fa-1`). You can
 
 ## The skill: how an agent learns to use it
 
-An agent that has never seen `stlive` will fumble with it. [`skill/SKILL.md`](skill/SKILL.md) is a short instruction file that teaches the **working loop** – reproduce → look in small steps → form a hypothesis and try it → fix → *re-run (not just resume)* → test → save – plus the GUI loop (change with `--ui`, look at a screenshot, press a button), and the traps (shell quoting, `resume` proves nothing, add a regression test and see it fail first, save every package).
+An agent that has never seen `stlive` will fumble with it. [`skill/SKILL.md`](skill/SKILL.md) starts with a compact **working loop** – reproduce → look in small steps → form a hypothesis and try it → fix → *re-run (not just resume)* → test → save – with detailed GUI workflows and troubleshooting in [`skill/references/workflows.md`](skill/references/workflows.md). It distinguishes live reruns, source agreement and tests of the saved local sources.
 
 Install it for Claude Code by copying it:
 
 ```bash
-mkdir -p ~/.claude/skills/stlive && cp skill/SKILL.md ~/.claude/skills/stlive/SKILL.md   # all projects
-# or per project: .claude/skills/stlive/SKILL.md
+mkdir -p ~/.claude/skills/stlive && cp -R skill/. ~/.claude/skills/stlive/   # all projects
+# or copy the whole skill directory into your project's .claude/skills/stlive/
 ```
 
 Then just ask: *"The test `CartTest` fails – find the cause with stlive, fix it and save the change."* Other agents can use the same file as project instructions. Without the skill the tool still works; the skill makes agents use it **efficiently and correctly**.
@@ -154,6 +154,8 @@ An image started by an older version of this tool (or any server that speaks the
 | Run / verify | `run --load src --eval … -- args` (fresh image, clean stdout, exit codes), `drift`, `save --verify` |
 | Persist | `save --package X \| --all --dir src [--dry-run]` |
 
+**Verification:** `debug rerun` starts a new execution in the same image, preserving earlier object mutations and other side effects. `save --verify` / `drift` check agreement with source files; they do not run tests. For a baseline-based project, save first and run `test run --fresh --load … --repository tonel://… --group …` against the saved local sources. Inspect targets, test counts and skips; this temporary image starts from the installed template, not a guaranteed dependency-free deployment environment.
+
 Full reference: [docs/commands.md](docs/commands.md). How it works: [docs/architecture.md](docs/architecture.md).
 
 ## Delivering what you built
@@ -173,7 +175,7 @@ The delivered image contains your application but no stlive classes and no evalu
 - Pharo 14 (needed for Spec-Gtk) is not part of this version; the differences live on the `pharo-14` branch.
 - Bloc/Toplo: the UI-process mechanism is the same, but `ui windows`/`ui press` currently understand Morphic-based windows only.
 - No single-stepping (step into/over), no capture of direct stdout/stderr writes, no authentication (loopback only) and no Unix-domain-socket transport.
-- No prebuilt binaries yet (installation needs a Rust toolchain), no SUnit tests for the Smalltalk side beyond the end-to-end scripts, and the skill has been tried on small cases only.
+- No prebuilt binaries yet (installation needs a Rust toolchain); the skill has been tried on small cases only. Smalltalk SUnit tests live in `smalltalk/src/StLive-Tests` and are loaded by the baseline's `Tests` group.
 
 ## CLI or MCP?
 
