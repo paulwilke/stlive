@@ -9,7 +9,7 @@ agent / shell ──► stlive (Rust, short-lived) ──► 127.0.0.1:<port> �
 ```
 
 ## Transport
-One JSON object per line over a fresh TCP connection to loopback; one JSON line back. The port and a per-run *epoch* are written by the image to `<state>/<instance>.port.json`. Every response carries the epoch. TCP on loopback was chosen over Unix domain sockets because Pharo's socket support for the latter is thin and loopback needs no setup.
+One JSON object per line over a fresh TCP connection to loopback; one JSON line back. The image parses and serializes the protocol with STON; NeoJSON is separately loaded by `init` for application use. The port and a per-run *epoch* are written by the image to `<state>/<instance>.port.json`. Every response carries the epoch. TCP on loopback was chosen over Unix domain sockets because Pharo's socket support for the latter is thin and loopback needs no setup.
 
 ## Keeping a failed execution alive
 Each evaluation (`eval`, one test, `debug eval`, `load`) runs in its own `Process` (`StLiveJob`) whose `errorHandler` is a `StLiveErrorHandler`. Pharo calls `Process>>handleError:` *on top of the failing stack* before anything is unwound. The handler registers a `StLiveSession` (wrapping a `DebugSession`), wakes the waiting request, and suspends the process. The stack, receivers and temporaries therefore stay intact and are reached later from any connection. Warnings and notifications keep their default behaviour. Timeouts suspend the running worker the same way (`kind: timeout`).
@@ -20,7 +20,9 @@ Each evaluation (`eval`, one test, `debug eval`, `load`) runs in its own `Proces
 - `debug return` – makes a frame return a value.
 - `debug rerun` – executes the stored origin (`cmd` + `args`) again as a fresh job.
 
-Only `rerun` produces `fresh_execution: true`; none of them is ever reported as a *verified* fix by the tool itself.
+Only `rerun` produces `fresh_execution: true`. It starts a new job in the **same image**, not a fresh image: object mutations, globals and external side effects from earlier runs remain. Neither rerun nor frame restart is a transaction or rollback. `resume`, `restart` and `return` report `fix_verified: false`; a successful rerun means the operation completed, not that its result met the requested contract.
+
+`save --verify` and `drift` compare live code with Tonel sources; they do not run behavioral tests. After saving, `test run --fresh --load … --repository tonel://… --group …` can test the local sources in a temporary image based on the installed template. Its prepared dependencies still matter; inspect test counts and skips before claiming verification.
 
 ## Stale detection
 A frame is `stale` when the method it runs is no longer the one installed in its class. `method compile` reports `stale_frames` across all suspended sessions.
