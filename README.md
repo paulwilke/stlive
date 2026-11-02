@@ -1,222 +1,117 @@
-# stlive – let an AI agent debug Smalltalk by looking at the running program
+# stlive — live Pharo development from the command line
 
-`stlive` is a command-line tool for **Pharo Smalltalk**. It keeps one Pharo image running in the background and lets you – or a coding agent such as Claude Code – work *inside* it from a shell:
+Inspect a running **Pharo Smalltalk** image, keep a failed execution available for debugging, compile a fix, and save the source changes to Git.
 
-- run code and, when it crashes, **keep the crashed program alive** instead of getting a wall of text,
-- **look around** in it, step by step: which call failed, what were the variables, what does that object contain,
-- **fix the method right there**, without restarting anything,
-- **run the operation again**, verify its behavior with tests, and
-- **write the fix back** into your source files as a small, clean `git diff`.
+ST Live is for developers and coding agents that work through a shell. The short-lived Rust client talks to a long-lived Pharo image; objects and debugger sessions stay in Pharo between commands.
 
-Normally an agent edits files, restarts the program and reads a log. Smalltalk can do much better because the program *is* the development environment – `stlive` hands that ability to the agent.
+## Install and try it
 
-## What can I do with it?
+You need a Rust toolchain, plus `curl` and `unzip` for automatic setup. Setup downloads Pharo 13. macOS and Linux are the primary platforms; core commands have also been verified on Windows 11. See [platform support](docs/operations.md#platform-support).
 
-| I want to… | Command |
+```sh
+cargo install --git https://github.com/paulwilke/stlive --locked
+stlive init
+```
+
+`init` builds a reusable server template under `~/.stlive`; it does not start a project instance. To use an existing local Pharo installation instead:
+
+```sh
+stlive init --vm /absolute/path/to/Pharo --image /absolute/path/to/Pharo.image
+```
+
+Then, in your project directory:
+
+```sh
+stlive start
+stlive eval '3 + 4'
+```
+
+The evaluation returns JSON with `ok: true` and `result.value.print: "7"`. Project state lives in `./.stlive`, with its own `.gitignore`.
+
+**Start here:** [a complete crash → inspect → fix → test → save tutorial](docs/getting-started.md). It creates its own example classes; no existing application is required. Shell examples use Bash-compatible syntax; the tutorial uses `jq` to extract IDs.
+
+## What it does
+
+| Task | Example |
 |---|---|
-| run some code in my running app | `stlive eval 'Cart new total'` |
-| see why it crashed – without a 200-line stack trace | `stlive debug frames dbg-… --limit 5`, then `stlive debug frame dbg-… 3` |
-| look at an object and what it points to | `stlive obj show obj-…`, `stlive obj graph obj-… --depth 3` |
-| try an idea inside the failing method's context | `stlive debug eval dbg-… --frame 3 'sum + 1'` |
-| fix a method in the running app | `stlive method compile Cart --file total.st` |
-| repeat the failing operation with the changed code | `stlive debug rerun dbg-…` (same image and object state; verify behavior with tests) |
-| run tests and see failures *grouped by cause* | `stlive test run MyApp-Tests` |
-| get the fix into my git repo | `stlive save --package MyApp --dir src --verify` |
-| check that image and files agree | `stlive drift --all --dir src` |
-| run the finished program headless from the sources | `stlive run --load src --eval 'MyApp run' -- arg` |
-| develop a window (Spec2/Morphic) while it is open | `stlive start --gui`, then `stlive eval --ui …` |
-| see the window – and click it – without leaving the shell | `stlive ui screenshot`, `stlive ui press Increment` |
+| Evaluate in the running image | `stlive eval '3 + 4'` |
+| Read source or discover an API | `stlive method show 'Cart>>total'`, `stlive find implementors total` |
+| Inspect a failed execution | `stlive debug frames SESSION --limit 5`, `stlive debug frame SESSION 3` |
+| Evaluate with a frame's variables | `stlive debug eval SESSION --frame 3 'subtotal'` |
+| Follow a live object | `stlive obj show REF`, `stlive obj items REF --limit 10` |
+| Compile a method from a file | `stlive method compile Cart --file total.st` |
+| Repeat the original operation | `stlive debug rerun SESSION` |
+| Run tests, grouped by failure cause | `stlive test run 'MyApp-Tests'` |
+| Save source changes and check agreement | `stlive save --package MyApp --dir src --verify` |
+| Test saved baseline sources separately | `stlive test run --fresh --load MyApp --repository "tonel://$PWD/src" --group Tests` |
+| Run a program from Tonel files | `stlive run --load src --eval 'MyApp run' -- arg1` |
+| Work with a Spec2/Morphic window | `stlive start --gui`, `stlive ui windows`, `stlive ui screenshot` |
 
-Every answer is small JSON (or readable text with `--text`), paged and with references to dig deeper – so an agent never has to read huge dumps.
+`Cart`, `MyApp`, `SESSION` and `REF` stand for your application's names and returned IDs. Use `stlive <command> --help` or the [command reference](docs/commands.md).
 
-## Two minutes: a crash, a fix, a proof
+For simple batch work, Pharo's built-in evaluation, scripts and test runner may be enough. ST Live adds persistent object references and preserved failure sessions when running state matters.
 
-```text
-$ stlive eval - <<< "| c | c := Cart new. c setUp. c add: 10. c total"
-{"ok":false,"error":{"type":"MessageNotUnderstood","session":"dbg-3fa-1",
-  "message":"receiver of \"adaptToNumber:andSend:\" is nil","first_application_frame":3, ...}}
+## What each check proves
 
-$ stlive debug frames dbg-3fa-1 --limit 4 | jq -c '.result.frames[]|[.index,.label,.origin]'
-[0,"UndefinedObject(Object)>>#adaptToInteger:andSend:","framework"]
-[1,"SmallInteger(Integer)>>#+","framework"]
-[2,"SmallInteger>>#+","framework"]
-[3,"Cart>>#total","application"]            <- our own code: the tax rate is nil
-
-$ stlive method compile Cart - <<< $'total\n\t...\n\t^ sum * (1 + (taxRate ifNil: [ 0 ]))'
-{"ok":true,"result":{"selector":"total","stale_frames":[{"session":"dbg-3fa-1","frame":3}]}}
-
-$ stlive debug resume dbg-3fa-1     # continue the OLD, broken run: stlive never calls this a repair
-{"ok":false,"mode":"resume", ...}
-
-$ stlive debug rerun dbg-3fa-1      # run the original operation again, from scratch, with the new code
-{"ok":true,"result":{"mode":"rerun","fresh_execution":true,"value":{"class":"SmallInteger","print":"15"}}}
-
-$ stlive save --package Demo --dir src && git diff --stat
-```
-
-The crashed run stays in the image as a **debug session** (`dbg-3fa-1`). You can come back to it with any number of separate commands – that is the trick that makes this useful for agents, who call tools one at a time.
-
-## The skill: how an agent learns to use it
-
-An agent that has never seen `stlive` will fumble with it. [`skill/SKILL.md`](skill/SKILL.md) starts with a compact **working loop** – reproduce → look in small steps → form a hypothesis and try it → fix → *re-run (not just resume)* → test → save – with detailed GUI workflows and troubleshooting in [`skill/references/workflows.md`](skill/references/workflows.md). It distinguishes live reruns, source agreement and tests of the saved local sources.
-
-Install it for Claude Code by copying it:
-
-```bash
-mkdir -p ~/.claude/skills/stlive && cp -R skill/. ~/.claude/skills/stlive/   # all projects
-# or copy the whole skill directory into your project's .claude/skills/stlive/
-```
-
-Then just ask: *"The test `CartTest` fails – find the cause with stlive, fix it and save the change."* Other agents can use the same file as project instructions. Without the skill the tool still works; the skill makes agents use it **efficiently and correctly**.
-
-## Why it is built this way
-
-- **Navigation instead of dumps.** Sessions, frames and objects have short references (`dbg-…`, `obj-…`). Answers are compact, paged and say when they were cut off.
-- **Resume ≠ re-run ≠ restart – and the tool says so.** Recompiling a method does not repair a run that is already half-way through. `debug resume`, `debug restart --frame n` and `debug rerun` are different, labelled operations (`fresh_execution`, `fix_verified`), and `method compile` lists the `stale_frames` that still run old code.
-- **Real Pharo.** Fixes are compiled by Pharo's own compiler into the live image; debugging uses Pharo's own debug machinery.
-- **Round trip to your repo.** `save` patches Tonel files method by method, so code review stays readable.
-
-## Developing a window (GUI mode)
-
-```bash
-stlive start --gui                      # Pharo opens WITH its window and stays connected
-stlive eval --ui - <<< "MyPresenter new open. 1"                 # --ui: run in the UI process (safe for Spec/Morphic)
-stlive eval --ui "(Smalltalk at: #App) labelPresenter label: 'Hello'. 1"
-stlive ui windows                       # titles, presenter classes, bounds
-stlive ui screenshot --window Demo      # PNG -> ./.stlive/screenshots/…   (look at it, or let the agent look)
-stlive ui press Increment               # click a button by its label
-stlive method compile MyPresenter --ui --file new.st    # change code while the window is open
-```
-
-An error inside the UI process becomes an ordinary stlive debug session – **no Pharo debugger window** appears and the GUI keeps running. That gives agents the loop *change → look → check* for Spec2/Morphic now (Bloc/Toplo are the same idea). For web UIs use `stlive open-ui http://localhost:8080` (a chromeless Chrome/Edge window). Details: [docs/architecture.md](docs/architecture.md#gui-mode-and-the-ui-process).
-
-Four ways to ship a Pharo app with a window (Spec2/Morphic, a web UI in a Chrome app window, a native `.app` with the system webview, Spec2 with GTK4), all built with stlive: [paulwilke/stlive-examples](https://github.com/paulwilke/stlive-examples).
-
-## Install
-
-Requirements: macOS or Linux (x86-64/arm64 where Pharo 13 VMs exist), `curl`, `unzip`, a [Rust toolchain](https://rustup.rs) to build, and `jq` for the examples.
-
-```bash
-cargo install --git https://github.com/paulwilke/stlive   # or: cargo build --release
-stlive init        # one time: downloads Pharo 13 (~100 MB) and builds an image containing the server
-```
-
-Per project, state lives in `./.stlive` (a `.gitignore` inside it is created automatically, so nothing from it – images, logs, Pharo's `ombu-sessions` – gets committed).
-
-`stlive init` keeps everything in `~/.stlive` (override with `STLIVE_HOME`). Nothing else is installed.
-
-Two directories matter: the **home** (`STLIVE_HOME`: VM, template image, sources – written by `init`, read by `start` and `run`) and the **state directory** (`STLIVE_DIR` / `--state-dir`: instances, port files, logs; default `./.stlive`). An environment that sets only `STLIVE_DIR` uses that directory as the home as well, so a forgotten `STLIVE_HOME` can never read from or write to `~/.stlive` – the separate environment gets `not_initialized` until you run `stlive init` in it.
-
-## Use
-
-```bash
-cd my-project                   # state (port, pid, log, image copy) lives in ./.stlive
-stlive start                    # headless image in the background
-stlive load MyProject --repository tonel://$PWD/src --group Tests      # Metacello baseline
-stlive test run MyProject-Tests
-stlive eval 'MyClass new run'
-stlive stop --force
-```
-
-A clean check in a fresh image, without touching your instance – instead of start/load/test/stop scripts:
-
-```bash
-stlive test run --fresh --load MyProject --repository tonel://$PWD/src --group Tests        # exit 0, 1 (red tests) or 6 (load failed)
-stlive test run 'MyProject-*-Tests'                                                          # several packages by pattern
-```
-
-Several images can run side by side (`--instance NAME`, `stlive image clone`, `stlive instances`). `--text` prints an indented human-readable form instead of JSON; `--pretty` pretty-prints JSON.
-
-`--log FILE` (or `STLIVE_LOG`) appends one JSON line per call (time, command, duration, output size, ok, key result fields) and `--tag`/`STLIVE_TAG` marks a scene or task – metadata and a 60-character summary of the call, never full code.
-
-Exit codes: `0` ok · `1` command failed, exception in the image or failing tests · `2` usage · `3` image not running/unreachable · `4` protocol error · `5` timeout · `6` `test run --fresh`: the load failed (error, warnings or undeclared names) · `130`/`143` a fresh run was interrupted (SIGINT/SIGTERM; its temporary instance is removed).
-
-### Already have a running image?
-
-```bash
-stlive init --vm /path/to/Pharo --image /path/to/Pharo.image   # once: use your local Pharo (no download); also records the framework package list
-stlive attach --port <port of the running server>                # loads the server into the RUNNING image, no restart
-```
-
-An image started by an older version of this tool (or any server that speaks the same JSON-line protocol) keeps running; `stlive` then talks to it through its own port. Everything done through `eval` or the IDE is recorded as well, so `save` can write it back.
-
-### What you can do
-
-| Area | Commands |
+| Operation | Meaning |
 |---|---|
-| Window | `start --gui`, `eval/compile --ui`, `ui windows\|screenshot\|press`, `open-ui` |
-| Image | `init` (`--vm`/`--image` for a local Pharo), `attach`, `start`, `stop --force`, `status`, `ping`, `instances`, `image info\|save\|clone`, `load` (re-loading updates loaded packages – also ones modified in the image – and the baseline itself) |
-| Evaluate | `eval` (stdin with `-`, `--in <ref>` as receiver, `--timeout`, `--full` complete text, `--no-session`; Transcript and deprecations reported separately) |
-| Code | `find class\|package\|implementors\|senders`, `class show\|create` (class-side ivars, class variables, comment, `--trait`, `--traits`), `method show\|compile\|remove`, `package list`, `changes list\|show\|watch` |
-| Tests | `test list`, `test run` (several targets and glob patterns such as `'App-*-Tests'`; `--fresh --load B --repository …` in a temporary image; what SUnit's `buildSuite` runs – inherited tests and every parameter combination of a `ParametrizedTestCase` included; per test isolation, failures **grouped by cause**, one session kept per group; `skipped` counted separately, `--skips-fail` makes them fail) |
-| Objects | `obj show\|items\|var\|text\|compare\|referrers\|graph\|release` – paged, with stable references; `graph` marks cycles and shared nodes |
-| Debugging | `debug list\|inspect\|frames\|frame\|locals\|receiver\|eval\|resume\|restart\|return\|rerun\|terminate` |
-| Run / verify | `run --load src --eval … -- args` (fresh image, clean stdout, exit codes), `drift`, `save --verify` |
-| Persist | `save --package X \| --all --dir src [--dry-run]` |
+| `debug resume` | Continue the suspended execution, including frames that may use old methods. |
+| `debug restart --frame N` | Restart one frame; surrounding object state is retained. |
+| `debug rerun` | Execute the original operation again in the same image. Earlier side effects remain. |
+| `save --verify` / `drift` | Compare live code with Tonel files; no behavioral tests are run. |
+| `test run` | Run selected tests in the current image. Check targets, counts and skips. |
+| `test run --fresh` | Load a baseline and run tests in a temporary image based on the installed template. Save first to test your changes. |
 
-**Verification:** `debug rerun` starts a new execution in the same image, preserving earlier object mutations and other side effects. `save --verify` / `drift` check agreement with source files; they do not run tests. For a baseline-based project, save first and run `test run --fresh --load … --repository tonel://… --group …` against the saved local sources. Inspect targets, test counts and skips; this temporary image starts from the installed template, not a guaranteed dependency-free deployment environment.
+`fresh_execution: true` means a new execution, not a new image or verified repair. Successful evaluation alone does not prove that its value is correct. See [project workflows](docs/workflows.md).
 
-Full reference: [docs/commands.md](docs/commands.md). How it works: [docs/architecture.md](docs/architecture.md).
+## Use with a coding agent
 
-## Delivering what you built
+The [agent skill](skill/SKILL.md) starts with a compact working loop and loads detail when needed. Copy the **whole directory**, including references, into your agent's skill location. For Claude Code, from a checkout of this repository:
 
-```bash
-stlive image export dist/MyApp.image --force     # saves a copy WITHOUT the stlive server, then ends this instance
+```sh
+mkdir -p ~/.claude/skills/stlive
+cp -R skill/. ~/.claude/skills/stlive/
 ```
 
-The delivered image contains your application but no stlive classes and no evaluation port (stlive's server is an open `eval` endpoint on localhost – never ship it). Start it with your own startup script. `stlive start` also keeps older images working: it upgrades the server inside an image automatically when the stlive binary is newer.
+Other shell-capable agents can read the same instructions. Guidance does not guarantee model reliability. This repository ships a CLI, not an MCP server; see the [CLI/MCP comparison](docs/cli-vs-mcp.md).
 
-## Status and what is still open
+## State and local access
 
-**Works and is tested** (203 headless + 19 GUI end-to-end checks, 150 SUnit tests of the server and 36 Rust unit tests, Pharo 13; macOS arm64 and Linux x86-64 – the 0.8.0 headless checks ran on Linux, the GUI checks were last run on macOS for 0.7.0): the whole debug loop, tests (inherited, parametrized and skipped tests, hundreds of red tests), Tonel write-back including traits, eval-made change recording, baseline re-loading, attach to a running image, GUI mode with Spec2/Morphic, screenshots and button presses, a headless image that survives unhandled errors in forked processes.
+- `save` writes source files; `image save` snapshots the image. They preserve different things.
+- `stop --force` discards image state not snapshotted. Save source changes before stopping; see [storage and lifecycle](docs/operations.md#storage-and-lifecycle).
+- Reloading a baseline lets files overwrite modified packages in the image. Save live changes first if you want to retain them.
+- The server accepts arbitrary Smalltalk on loopback, **without authentication**. Keep it local; use `image export` to remove it from an exported application image.
+- `attach` needs an existing compatible JSON-line evaluation endpoint. It cannot attach to an arbitrary Pharo process by PID. See [attaching](docs/operations.md#attach-to-an-existing-image).
 
-**Open / not yet verified:**
-- Windows: verified on Windows 11 by the Orbit project (Pharo 13, VM 10.3.9): `init`, `start`, `load`, `eval` and the tests. **Not verified on Windows:** GUI mode (`start --gui`) and the `ui` commands (`ui windows|screenshot|press`, `eval/compile --ui`), `open-ui`, and the end-to-end suite (CI only builds). Linux is written for and was run for the 0.8.0 headless checks, but is less exercised.
-- Pharo 14 (needed for Spec-Gtk) is not part of this version; the differences live on the `pharo-14` branch.
-- Bloc/Toplo: the UI-process mechanism is the same, but `ui windows`/`ui press` currently understand Morphic-based windows only.
-- No single-stepping (step into/over), no capture of direct stdout/stderr writes, no authentication (loopback only) and no Unix-domain-socket transport.
-- No prebuilt binaries yet (installation needs a Rust toolchain); the skill has been tried on small cases only. Smalltalk SUnit tests live in `smalltalk/src/StLive-Tests` and are loaded by the baseline's `Tests` group.
+## Documentation
 
-## CLI or MCP?
+| Read this | For |
+|---|---|
+| [Getting started](docs/getting-started.md) | Two runnable examples in a disposable project |
+| [Project workflows](docs/workflows.md) | Baselines, source round trips, fresh tests and GUI work |
+| [Operations and troubleshooting](docs/operations.md) | Directories, instances, exit codes, compatibility and recovery |
+| [Command reference](docs/commands.md) | Generated command and option help |
+| [Architecture](docs/architecture.md) | Protocol, workers, sessions and implementation |
+| [Agent skill](skill/SKILL.md) | Compact guidance for coding agents |
+| [Changelog](CHANGELOG.md) | Version-specific changes and historical validation |
 
-Short version: this is a CLI because a shell is the one integration point every coding agent already has – and the design keeps the *protocol* separate, so an MCP wrapper would be a thin layer on top (see [docs/cli-vs-mcp.md](docs/cli-vs-mcp.md) for the honest trade-offs).
-
-## Safety
-
-- The server listens on `127.0.0.1` only, on an ephemeral port published in the instance's state directory. There is **no authentication**: anyone who can connect to that local port can execute arbitrary Smalltalk in the image. Treat it like a local dev REPL, not a service.
-- Destructive operations (`stop`, `method remove`) need `--force`. Output is bounded everywhere; endless loops become sessions after `--timeout` instead of hanging.
-- References and sessions carry the image's run id, so they are rejected as `stale_ref` after a restart rather than silently pointing at something else.
-- `load` lets the files win: a package that was modified in the image (methods compiled through stlive) is overwritten by a re-load and its unsaved recorded changes are marked superseded, so a later `save` cannot resurrect them. Save first if you want to keep such changes. A package the baseline no longer lists stays in the image and is reported as `stale_packages`; `load --prune` unloads it (not when it has unsaved changes). Packages of groups that were not requested are reported as `not_reloaded_packages`, and names that the loaded code references but nothing defines as `undeclared`.
-
-## Limitations
-
-- GUI mode is verified with Spec2/Morphic on macOS (Pharo 13). On Windows it has not been run.
-
-- Only Pharo 13 is tested. macOS arm64 is the development platform; Linux should work but is less exercised. Windows is verified on Windows 11 by the Orbit project: `init`, `start`, `load`, `eval` and tests (since 0.8.1); GUI mode and the `ui` commands are not verified there.
-- Direct writes to the VM's stdout/stderr are not captured (Transcript is).
-- An image saved by stlive 0.7.x or older can contain a running acceptor process that makes it hang at the next start (seen on macOS). Delete that instance's image; `start` rebuilds it from the template. Images saved by 0.8.0 do not have this problem.
-- A method compiled from inside `eval` (`Foo compile: '…'`) keeps the line endings typed in the expression (LF) in the live image; `method compile` and Tonel loads use CR. The files are LF either way.
-- `stop` discards unsaved state (also loaded packages): `image save` first to keep it.
-- No single-stepping (`step into/over`) yet; sessions can be restarted per frame, resumed, or have a frame return a value.
-- `save` knows classes, traits, instance/class-side methods, extensions and removals of methods, and updates the variable lists (`#instVars`, `#classVars`, `#classInstVars`) of an existing definition while keeping its other lines (`#traits`, `#classTraits`, `#category`); it writes a changed class comment back, but does not rewrite a changed superclass or trait composition of an existing class.
-- A headless image no longer quits on an unhandled error in a process that is not an stlive job (a forked process of your application): the error is logged (instance log, `image info` → `background_errors`) and only that process ends. In GUI mode Pharo's debugger opens as usual.
-- Endless recursion is reported as a repeating pattern of the top frames; the starting call is deep below the 100 000-frame inspection cap.
+Application examples: [paulwilke/stlive-examples](https://github.com/paulwilke/stlive-examples).
 
 ## Development
 
-```bash
-cargo build --release
-cargo test --release
-./tests/e2e.sh          # needs `stlive init` once; ~2 min; starts its own image in a temp dir (STLIVE_HOME names the template, default ~/.stlive)
+```sh
+cargo build --release --locked
+cargo test --release --locked
+# Requires an initialized template and jq; starts a temporary instance:
+./tests/e2e.sh
+# Regenerate CLI help after changing commands:
 ./scripts/gen-reference.sh
 ```
 
-The Smalltalk side lives in `smalltalk/src` (Tonel) and is compiled into the binary; `stlive init` writes it out and loads it with Metacello.
+Rust client code is in `src/`; the Pharo server and SUnit tests are in `smalltalk/src/`. Smalltalk sources are embedded in the binary and loaded during setup. See [architecture](docs/architecture.md) and [validation](docs/operations.md#validation-and-known-limitations).
 
-## Third-party software
+## License
 
-`stlive` itself contains only its own code (MIT). At `stlive init` it downloads, from their upstream locations and not bundled in this repository: **Pharo** (VM and image; MIT, https://pharo.org) and **NeoJSON** (JSON library, MIT, Sven Van Caekenberghe, https://github.com/svenvc/NeoJSON). An image exported with `stlive image export` contains both – when you distribute it, include their MIT license notices.
+MIT; see [LICENSE](LICENSE). Setup fetches Pharo and NeoJSON from upstream; exported applications containing them must retain their MIT notices. See [third-party software](docs/operations.md#third-party-software).
 
-## License and trademarks
-
-MIT, see [LICENSE](LICENSE). *stlive* is an independent tool and is not affiliated with or endorsed by the Pharo project or the Pharo consortium; "Pharo" and other product names are used only to say what the tool works with.
+ST Live is independent of the Pharo project and consortium. Product names identify supported software and do not imply endorsement.

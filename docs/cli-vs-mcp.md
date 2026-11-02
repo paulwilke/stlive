@@ -1,5 +1,7 @@
 # CLI or MCP?
 
+[Documentation home](../README.md#documentation) · [Architecture](architecture.md)
+
 Both can expose exactly the same operations. The question is which integration fits the way you work.
 
 | | CLI (this tool) | MCP server |

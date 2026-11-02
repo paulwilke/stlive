@@ -1,5 +1,7 @@
 # Architecture
 
+[Documentation home](../README.md#documentation) · [Project workflows](workflows.md) · [Operations](operations.md)
+
 ```
 agent / shell ──► stlive (Rust, short-lived) ──► 127.0.0.1:<port> ──► headless Pharo image (long-lived)
                   JSON line per request/response                       StLiveServer
@@ -12,7 +14,7 @@ agent / shell ──► stlive (Rust, short-lived) ──► 127.0.0.1:<port> �
 One JSON object per line over a fresh TCP connection to loopback; one JSON line back. The image parses and serializes the protocol with STON; NeoJSON is separately loaded by `init` for application use. The port and a per-run *epoch* are written by the image to `<state>/<instance>.port.json`. Every response carries the epoch. TCP on loopback was chosen over Unix domain sockets because Pharo's socket support for the latter is thin and loopback needs no setup.
 
 ## Keeping a failed execution alive
-Each evaluation (`eval`, one test, `debug eval`, `load`) runs in its own `Process` (`StLiveJob`) whose `errorHandler` is a `StLiveErrorHandler`. Pharo calls `Process>>handleError:` *on top of the failing stack* before anything is unwound. The handler registers a `StLiveSession` (wrapping a `DebugSession`), wakes the waiting request, and suspends the process. The stack, receivers and temporaries therefore stay intact and are reached later from any connection. Warnings and notifications keep their default behaviour. Timeouts suspend the running worker the same way (`kind: timeout`).
+Each evaluation (`eval`, one test, `debug eval`, `load`) runs in its own `Process` (`StLiveJob`) whose `errorHandler` is a `StLiveErrorHandler`. Pharo calls `Process>>handleError:` *on top of the failing stack* before anything is unwound. The handler registers a `StLiveSession` (wrapping a `DebugSession`), wakes the waiting request, and suspends the process. The stack, receivers and temporaries therefore stay intact and are reached later from any connection. Notifications retain their default behavior; worker warnings are recorded and resumed, while deprecations are collected separately. Timeouts suspend the running worker in the same way; the command response reports `kind: timeout` (the internal session is created as `interrupted`).
 
 ## Resume, restart, re-run
 - `debug resume` – resumes the suspended process: the handler returns and execution continues with the *existing* frames (optionally answering a value for the failed send).
@@ -46,7 +48,7 @@ Metacello is run in a job (failures become sessions). Two things Pharo would not
 Pharo's default error handler for processes without their own (`ErrorHandler defaultErrorHandler`, the NonInteractiveUIManager in a headless image) quits the image. While the server runs, `StLiveBackgroundErrorHandler` takes that place: it records the error (`StLiveServer>>backgroundErrors`, shown by `image info`), prints it with ten frames to the instance log and terminates only the failing process. Jobs are unaffected (their processes have `StLiveErrorHandler`), and a GUI image keeps the Morphic manager (debugger).
 
 ## Layout
-`src/` Rust client (`main.rs`, `save.rs`, `init.rs`) · `smalltalk/src/StLive` server (Commands, Server, Job, Session, ErrorHandler, BackgroundErrorHandler, Describer, TranscriptTee, Failure) · `tests/e2e.sh` · `skill/` agent instructions.
+`src/` Rust client (`main.rs`, `save.rs`, `init.rs`, `testrun.rs`, `platform.rs`) · `smalltalk/src/StLive` server (Commands, Server, Job, Session, ErrorHandler, BackgroundErrorHandler, Describer, TranscriptTee, Failure) · `tests/e2e.sh` · `skill/` agent instructions.
 
 Directories: `STLIVE_HOME` holds the template (VM, image, sources; default `~/.stlive`, or `STLIVE_DIR` when only that is set), `STLIVE_DIR`/`--state-dir` the instances (default `./.stlive`).
 

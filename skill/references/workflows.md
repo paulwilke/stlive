@@ -1,7 +1,7 @@
 
 # stlive – live development in a Pharo image
 
-Every command prints JSON: `{"ok":true,"result":...}` or `{"ok":false,"error":...}` (use `--text` for a readable form). Use `jq` to pick fields; never dump big results – ask for the part you need. Exit code 0 = ok, 1 = failure/exception/failing tests, 2 = usage, 3 = image not running, 5 = timeout, 6 = `test run --fresh`: the load failed, 130/143 = a fresh run was interrupted.
+Most live request commands print JSON: `{"ok":true,"result":...}` or `{"ok":false,"error":...}` (use `--text` for a readable form). `run` prints the program result directly; `changes watch` streams JSON lines; help/version print text. Use `jq` to pick fields; never dump big results – ask for the part you need. Exit code 0 = ok, 1 = failure/exception/failing tests, 2 = usage, 3 = image not running, 5 = timeout, 6 = `test run --fresh`: the load failed, 130/143 = a fresh run was interrupted.
 
 ## Setup
 ```bash
@@ -18,7 +18,7 @@ Re-running `load` after editing files updates the loaded packages: packages chan
 1. **Reproduce** with `eval` or `test run`. A failure is not a tool error: it becomes a **debug session** that keeps the stack alive.
    - `stlive eval '<code>'` (`-` reads stdin; `--timeout ms` turns endless loops into a session; `--in <ref>` sets `self`). Result: `result.value.{class,print,ref}`, `result.output.{transcript,deprecations}`. Failure: `error.{type,message,session,first_application_frame}` (and `error.recursion` for endless recursion).
    - `stlive test run <TestClass | Class>>test | Package>` → `result.{ran,passed,failed,skipped}` and `result.groups[]` (failures grouped by cause, first application frame, one representative session each). It runs what SUnit runs: inherited test methods of an abstract superclass included, an abstract class runs its concrete subclasses, a `ParametrizedTestCase` once per parameter combination (reported as `Class>>sel (#param->value)`; that string is also a valid target). Skipped tests (`self skip`) are listed in `skipped_tests` and are neither passed nor failed; `--skips-fail` makes the exit code 1 when any test was skipped (use it when the project's policy says skips are failures). `stlive test list <glob>` finds test classes. Several targets and patterns run as one run: `stlive test run 'App-*-Tests' 'Foo>>testBar'`.
-   - For a clean check (does the baseline load into a fresh image, do the tests pass there) use `stlive test run --fresh --load <Baseline> --repository tonel://$PWD/src [--group Tests]` – exit 6 means the load failed (see `error.load_error` and `result.load.undeclared`); `--keep` leaves the instance for `stlive -i <name> debug …`. Do not write start/load/test/stop scripts for this.
+   - For a clean check (does the baseline load into a fresh image, do the tests pass there) use `stlive test run --fresh --load <Baseline> --repository tonel://$PWD/src [--group Tests]` – exit 6 means the load failed (see `error.load_error` and `result.load.undeclared`); `--keep` leaves the instance for `stlive -i <name> debug …`. Prefer the built-in fresh runner when it fits the project.
 2. **Navigate in small steps** (never print the whole stack):
    - `debug frames <session> --limit 5` → `origin` is application/framework/eval; start at `first_application_frame`.
    - `debug frame <session> <n> [--no-source]` → executing statement, receiver, variables with `kind` (argument, temporary, block_argument, block_temporary, outer_block_*).
@@ -45,7 +45,7 @@ For web UIs run `stlive open-ui <url>` (chromeless Chrome/Edge window) instead �
 
 ## Practical tips
 - Before you finish: `stlive save --all --dir <repo>/src --verify` (or `stlive drift --all --dir <repo>/src`). It compares the image with the Tonel files; it does not run tests. It fails if a method exists only in the image – changes that were not recorded would otherwise only show up in a fresh image (red tests).
-- To run the finished program from the sources in a clean image: `stlive run --load <repo>/src --eval 'MyApp run' -- arg1 arg2` (stdout = only the result, errors on stderr, `StLiveRun arguments` for the arguments, `StLiveRun exit: n` for the exit code). Do not write your own loader script.
+- To run the finished program from the sources in a clean image: `stlive run --load <repo>/src --eval 'MyApp run' -- arg1 arg2` (stdout = only the result, errors on stderr, `StLiveRun arguments` for the arguments, `StLiveRun exit: n` for the exit code). Use this built-in loader when it fits; ordinary Pharo scripts remain valid for independent batch checks.
   Example – a start script (the Smalltalk goes into a file, so shell quoting cannot mangle string literals):
   ```bash
   # start.st

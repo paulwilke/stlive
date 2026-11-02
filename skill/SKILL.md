@@ -5,7 +5,7 @@ description: Work inside a running Pharo (Smalltalk) image with the `stlive` CLI
 
 # ST Live: compact working loop
 
-Use the existing project instance and baseline. Do not restart a shared image or reload files over unsaved live changes without coordinating with its owner. Each command returns JSON with `ok`; read the actual result before choosing the next action.
+Use the existing project instance and baseline. Do not restart a shared image or reload files over unsaved live changes without coordinating with its owner. Live request commands return JSON with `ok`; read the actual result before choosing the next action.
 
 ## Start with these operations
 
@@ -29,7 +29,9 @@ Use real names from the project and real session IDs returned by the tool. A met
 
 ## Repair and inspect
 
-Reproduce the reported behavior or run the relevant test. An exception can return `error.session` and `first_application_frame`; inspect a small page of frames, then the relevant frame's source and variables. Follow object references only as needed. Compile the smallest justified change and run the relevant checks again.
+Reproduce the reported behavior or run the relevant test. An exception can return `error.session` and `first_application_frame`; inspect a small page of frames, then the relevant frame's source and variables. Follow object references only as needed. If the task supplies a live object, inspect it with `obj show`, keep its reference, compile on its class and use `eval --in REF` to call the new method on that same instance. Do not replace it when state or identity must survive. An instance variable does not automatically provide a getter.
+
+Compile the smallest justified change. Check the original failure plus relevant edge cases, preferably with explicit Boolean comparisons or assertions. After an error, read its message and stack; change the input or strategy before retrying rather than repeating an unchanged failed call.
 
 - `debug resume` continues the old execution; existing frames may still use old methods.
 - `debug restart` restarts one frame; it does not reset the image or object state.
@@ -47,7 +49,7 @@ Save the changed packages, inspect the Git diff, and check source agreement with
 stlive test run --fresh --load MyApp --repository "tonel://$PWD/src" --group Tests
 ```
 
-Replace `MyApp` and `Tests` with the project's actual baseline and group. This uses a temporary image from the installed template, which may contain prepared dependencies; it does not validate arbitrary deployment environments. Check the returned targets, counts and skipped tests. A zero-test run is not evidence that the requested behavior passed. If a fresh check is unavailable, say so.
+Replace `MyApp` and `Tests` with the project's actual baseline and group. This uses a temporary image from the installed template, which may contain prepared dependencies; it does not validate arbitrary deployment environments. Check the returned targets, counts and skipped tests. `test run` may return `ok: true` with failed tests and exit 1; inspect counts and exit status. A zero-test run is not evidence that the requested behavior passed. If a fresh check is unavailable, say so.
 
 Report what changed, which checks actually ran and their results, whether files were saved, and what remains unverified. Do not infer success from a command name or claim checks you did not run. Keep unresolved debugger sessions available if needed; clean up only your own task's sessions.
 
