@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.8.2 – compact skill and honest verification wording
+Documentation and skill only; commands, options and response formats are unchanged.
+- **The skill is split**: `skill/SKILL.md` is a compact entry point (a small command set, instance vs class side, a repair loop, an evidence-based finish); setup, reload behaviour, objects, traits, GUI work, export, exit codes and troubleshooting moved to `skill/references/workflows.md`, read only when needed. **Install the whole directory**: `cp -R skill/. ~/.claude/skills/stlive/` – copying only `SKILL.md` loses the reference.
+- **What a check proves is stated precisely**: `debug rerun` (`fresh_execution: true`) runs again in the *same* image – earlier object mutations and side effects remain, it is no rollback and no verified repair; `save --verify` / `drift` check that image and files agree, they run no tests; behaviour of the saved sources is checked with `test run --fresh --load … --repository …` (inspect targets, counts and skips). README, `docs/architecture.md` and the skill say so.
+- Agents are told to keep other tasks' live sessions and shared images alone and not to weaken acceptance tests to get a green result.
+- README: the outdated claim that there are no SUnit tests for the Smalltalk side is gone (`StLive-Tests`, group `Tests`); `docs/architecture.md` names STON as the protocol format; `docs/cli-vs-mcp.md` qualifies the context-cost and adapter-size claims.
+
 ## 0.8.1 – Windows fixes from the first Windows run
 First successful runs of `init`, `start`, `load` and `test run` on Windows 11 (Pharo 13, VM 10.3.9), done by the Orbit project. Both fixes are Windows-only; Unix behaviour is unchanged.
 - **Fix (Windows): `stlive start` hands the VM plain paths.** `std::fs::canonicalize` answers the extended-length form (`\\?\C:\...`) on Windows, which the Pharo VM does not open ("Image file not found"), so `start` ended with "the image ended before it published its port". `start`, `run` and `init --vm` now use `platform::absolute`, which strips the `\\?\` and `\\?\UNC\` prefixes.
