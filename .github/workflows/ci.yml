@@ -1,13 +1,93 @@
 name: ci
-on: [push, pull_request]
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
 jobs:
-  build:
+  # Build and unit tests (no Pharo needed).
+  test:
+    name: test (${{ matrix.os }})
     strategy:
+      fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
       - run: cargo build --release
-      - run: cargo clippy --release -- -D warnings || true
+      - run: cargo test --release
+
+  clippy:
+    name: clippy (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo clippy --release --all-targets -- -D warnings
+
+  # End-to-end against a real Pharo image: `stlive init --pharo N` into a fresh STLIVE_HOME, then tests/e2e.sh.
+  e2e:
+    name: e2e (Pharo ${{ matrix.pharo }}, ${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        pharo: [13, 14]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - name: A fresh STLIVE_HOME outside the checkout
+        run: echo "STLIVE_HOME=$RUNNER_TEMP/stlive-home" >> "$GITHUB_ENV"
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Tools for the e2e scripts (jq, curl, unzip; xvfb for the GUI test on Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq jq curl unzip xvfb
+      - run: cargo build --release
+
+      # The get.pharo.org download (VM + image, ~100 MB) per version and platform. The directory also holds
+      # neojson.image, which `init` builds from the downloaded image with the Metacello script in src/init.rs,
+      # so the exact key includes that file; an older entry still saves the download and only NeoJSON is reloaded.
+      - name: Cache the Pharo ${{ matrix.pharo }} download
+        id: pharo-cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.STLIVE_HOME }}/pharo
+          key: pharo-${{ matrix.pharo }}-${{ runner.os }}-${{ runner.arch }}-v1-${{ hashFiles('src/init.rs') }}
+          restore-keys: pharo-${{ matrix.pharo }}-${{ runner.os }}-${{ runner.arch }}-v1-
+      - name: Drop a NeoJSON image built by an older init.rs
+        if: steps.pharo-cache.outputs.cache-hit != 'true'
+        run: rm -f "$STLIVE_HOME"/pharo/neojson.*
+
+      - name: stlive init --pharo ${{ matrix.pharo }}
+        run: target/release/stlive init --pharo ${{ matrix.pharo }}
+      - name: tests/e2e.sh
+        run: ./tests/e2e.sh
+      # tests/e2e-gui.sh opens real Pharo windows. On Linux it runs under a virtual X server; on the macOS runners
+      # it is left out: there is no reliable window session there, so a failure would say nothing about stlive.
+      - name: tests/e2e-gui.sh (xvfb)
+        if: runner.os == 'Linux'
+        run: xvfb-run -a -s "-screen 0 1280x1024x24" ./tests/e2e-gui.sh
+      - name: stlive logs on failure
+        if: failure()
+        run: |
+          find "$STLIVE_HOME" -maxdepth 2 -name '*.log' -print -exec tail -n 50 {} \; || true

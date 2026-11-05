@@ -8,13 +8,13 @@ Class {
 StLiveBaselineShapeTest >> testDefaultGroupLoadsOnlyTheFramework [
 	| version |
 	version := (Smalltalk at: #BaselineOfStLive) version.
-	self assert: ((version packagesForSpecNamed: 'default') collect: [ :p | p name asString ]) asArray equals: #('StLive')
+	self assert: (commands packageNamesOfSpecNamed: 'default' in: version) asArray equals: #('StLive')
 ]
 
 { #category : 'groups' }
 StLiveBaselineShapeTest >> testTestsGroupAddsTheTestPackage [
 	| names |
-	names := ((Smalltalk at: #BaselineOfStLive) version packagesForSpecNamed: 'Tests') collect: [ :p | p name asString ].
+	names := commands packageNamesOfSpecNamed: 'Tests' in: (Smalltalk at: #BaselineOfStLive) version.
 	self assert: names asSet equals: #('StLive' 'StLive-Tests') asSet
 ]
 

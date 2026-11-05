@@ -81,13 +81,13 @@ Do not delete the only copy of unsaved work when recovering an image. `start` re
 
 ## Platform support
 
-The supported image target for this release is **Pharo 13**. Pharo 14 work is on the separate `pharo-14` branch.
+One binary supports **Pharo 13 and Pharo 14**. `stlive init` installs 14 by default; `stlive init --pharo 13` selects 13, and a second version is installed beside the default one (`~/.stlive/pharo13/`, `config-13.json`). `start --pharo N` and `run --pharo N` pick a version; an instance remembers the version of its image (`"pharo"` in its config, shown by `status`, `image info` and `instances`) and refuses `--pharo` of another one (`pharo_mismatch`). A template made before 0.9 has no version recorded; it is detected from the `PharoNN.x-….sources` file next to its image (or `printVersion`), never assumed. What differs: Pharo before 14 needs `st file --no-quit` to stay alive, Pharo 14 keeps running by default and rejects the flag; stlive picks the right form from the detected version. `start --gtk` (`--worker --headless`) is an unverified opt-in for Spec-Gtk style work; `--vm-arg` passes extra VM options.
 
 | Platform | Recorded coverage | Remaining uncertainty |
 |---|---|---|
 | macOS arm64 | Main development platform; headless and Spec2/Morphic GUI workflows | GUI E2E last recorded for 0.7.0 |
 | Linux x86-64 | Headless E2E recorded for 0.8.0; CI builds | Less exercised than macOS; no equivalent GUI claim |
-| Windows 11 | Orbit verified init/start/load/eval/tests with Pharo 13 and VM 10.3.9 in 0.8.1 | GUI, UI commands, open-ui and E2E suite not verified |
+| Windows 11 | Orbit verified init/start/load/eval/tests with Pharo 13 and VM 10.3.9 in 0.8.1; Pharo 14 not tried | GUI, UI commands, open-ui and E2E suite not verified |
 
 Automatic download also depends on an upstream Pharo VM for your OS/architecture. Shell examples in these docs are not PowerShell scripts. Installation currently requires Rust; no prebuilt binaries are shipped.
 

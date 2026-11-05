@@ -10,7 +10,7 @@ Work inside a live Pharo image: eval, inspect, debug, fix, re-run.
 Usage: stlive [OPTIONS] <COMMAND>
 
 Commands:
-  init       One-time setup: download Pharo 13 and build an image with the StLive server
+  init       One-time setup: download Pharo (14 by default, or --pharo 13) and build an image with the StLive server
   attach     Load the StLive server into an image that is ALREADY running (another stlive/pharoctl server on --port)
   instances  List instances known in the state directory. Temporary ones (from `test run --fresh`) are marked, and so are the orphaned ones: their run is gone, or their image died
   start      Start the image headless in the background
@@ -50,17 +50,18 @@ Options:
 ## `stlive init`
 
 ```
-One-time setup: download Pharo 13 and build an image with the StLive server
+One-time setup: download Pharo (14 by default, or --pharo 13) and build an image with the StLive server
 
 Usage: stlive init [OPTIONS]
 
 Options:
-      --force                  Re-download and rebuild even if present
   -i, --instance <INSTANCE>    Instance name (several images can run side by side) [env: STLIVE_INSTANCE=] [default: default]
+      --pharo <PHARO>          Pharo major version to download and build: 13 or 14 (default: the version of the existing default template, else 14). A second version is installed beside the default one
+      --force                  Re-download and rebuild even if present
       --state-dir <STATE_DIR>  Directory holding instance state (port file, pid, log, config) [env: STLIVE_DIR=]
+      --pretty                 Pretty-print JSON
       --vm <VM>                Use this local Pharo VM instead of downloading (needs --image)
       --image <IMAGE>          Use this pristine Pharo image as the base instead of downloading (needs --vm)
-      --pretty                 Pretty-print JSON
       --log <LOG>              Append one JSON line per call (time, command, duration, output size, ok, key result fields) to this file [env: STLIVE_LOG=]
       --tag <TAG>              Free-form marker written to the call log (scene, task, ...) [env: STLIVE_TAG=]
       --text                   Human-readable indented text instead of JSON (exit codes are unchanged)
@@ -79,6 +80,7 @@ Options:
       --port <PORT>            Port of the running server (its state file: <dir>/<instance>.port.json)
       --pid <PID>              Process id of that image (found automatically if omitted (lsof or netstat))
       --state-dir <STATE_DIR>  Directory holding instance state (port file, pid, log, config) [env: STLIVE_DIR=]
+      --pharo <PHARO>          Pharo major version of that image (default: asked from the running image)
       --pretty                 Pretty-print JSON
       --log <LOG>              Append one JSON line per call (time, command, duration, output size, ok, key result fields) to this file [env: STLIVE_LOG=]
       --tag <TAG>              Free-form marker written to the call log (scene, task, ...) [env: STLIVE_TAG=]
@@ -110,6 +112,7 @@ Options:
       --text                   Human-readable indented text instead of JSON (exit codes are unchanged)
       --timeout <TIMEOUT>      Seconds before the run is killed (exit code 124) [default: 300]
       --keep                   Keep the work directory (image, logs) for inspection
+      --pharo <PHARO>          Use the template of this Pharo major version (default: the default template)
   -h, --help                   Print help
 ```
 
@@ -147,8 +150,11 @@ Options:
       --state-dir <STATE_DIR>  Directory holding instance state (port file, pid, log, config) [env: STLIVE_DIR=]
       --gui                    Start Pharo WITH its window (Morphic/Spec/Bloc development) instead of headless; everything else is the same
       --pretty                 Pretty-print JSON
+      --gtk                    Start with `--worker --headless` (worker-process mode, for Spec-Gtk style development). Opt-in and unverified; plain headless keeps the image alive on Pharo 13 and 14
       --log <LOG>              Append one JSON line per call (time, command, duration, output size, ok, key result fields) to this file [env: STLIVE_LOG=]
       --tag <TAG>              Free-form marker written to the call log (scene, task, ...) [env: STLIVE_TAG=]
+      --vm-arg <VM_ARGS>       Extra VM option placed before the image (repeatable), e.g. --vm-arg=--worker. Not remembered
+      --pharo <PHARO>          Use the template of this Pharo major version (installed with `init --pharo N`). Default: the version this instance remembers, else the default template
       --text                   Human-readable indented text instead of JSON (exit codes are unchanged)
   -h, --help                   Print help
 ```
@@ -861,6 +867,7 @@ Options:
       --group <GROUPS>               With --fresh: groups to load (repeatable); default group if none
       --keep                         With --fresh: keep the instance running after the run (its name is in the output) to debug the failing tests with `stlive -i NAME debug ...`; stop it with `stlive -i NAME stop --force`
       --load-timeout <LOAD_TIMEOUT>  With --fresh: milliseconds the baseline load may take (default 600000)
+      --pharo <PHARO>                With --fresh: Pharo major version of the template to use (default: the default template)
   -h, --help                         Print help
 ```
 

@@ -40,13 +40,13 @@ StLiveErrorHandler >> handleError: anError [
 { #category : 'handling' }
 StLiveErrorHandler >> handleNotification: aNotification [
 	"Unhandled notifications and warnings are not errors: let them run their default action."
-	^ ErrorHandler defaultErrorHandler handleNotification: aNotification
+	^ job server systemErrorHandler handleNotification: aNotification
 ]
 
 { #category : 'handling' }
 StLiveErrorHandler >> doesNotUnderstand: aMessage [
 	"Everything but errors (warnings, notifications, ...) keeps its default behaviour."
-	^ aMessage sendTo: ErrorHandler defaultErrorHandler
+	^ aMessage sendTo: job server systemErrorHandler
 ]
 
 { #category : 'handling' }

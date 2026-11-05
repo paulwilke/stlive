@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.9.0 – Pharo 13 and Pharo 14 with one binary
+- **The Pharo version is detected and remembered.** Template configs (`config.json`, `config-N.json`) and instance configs carry `"pharo": N`. A config without the key (every home made by 0.8.x) is detected when needed from the `PharoNN.x-….sources` file next to the image or the VM, else from `printVersion --release`; it is never assumed. `status`, `image info`, the `start` result (`pharo_major`) and `instances` report it.
+- **Launch arguments follow the version.** Pharo 14 replaced the command-line handlers (Clap): `st script.st --no-quit` fails there, and `st` keeps the image running by default. `start` (headless and `--gui`) therefore runs `st serve.st --no-quit` before Pharo 14 and `st serve.st` from 14 on. `run` (`--quit`) and the init scripts (which end with `snapshot:andQuit:`) work on both.
+- **`init --pharo 13|14`.** A fresh home gets Pharo 14 (downloaded from get.pharo.org into `pharo/`, the default template). If the home already has a default template of another version, `init --pharo N` installs N beside it (`pharoN/`, `config-N.json`, `system-packages-N.txt`) and keeps the default. `init --vm/--image` detects the version of the given image and refuses a contradicting `--pharo`.
+- **`start --pharo N`, `run --pharo N`, `test run --fresh --pharo N`** use that version's template. An instance remembers its version; without the flag it keeps it, a new instance takes the default template. `--pharo` against an instance whose image is another version fails with `pharo_mismatch` (use another instance name).
+- **`start --vm-arg X`** (repeatable) puts extra VM options before the image. **`start --gtk`** is an explicit opt-in for `--worker --headless` (Spec-Gtk style work); it is unverified and never selected automatically – plain headless keeps the image alive on 13 and 14.
+- **Server fixes for Pharo 14** (all written to work on 13 as well, by capability checks):
+  - the background error handler uses `ErrorHandler default`/`default:` (`defaultErrorHandler` is gone); a GUI image is recognised by `MorphicErrorHandler`/`InteractiveErrorHandler` as well as `MorphicUIManager`;
+  - frame variables use `Context>>temporaryVariableNames` (`tempNames` is gone);
+  - `method compile` compiles once without installing, so undeclared names and syntax errors arrive as `OCCodeError` on both versions (Pharo 14's `compile:classified:` raises `OCCompilationError` for them); the undeclared-variable report (`compile_error` with `variable`, line, column) is unchanged;
+  - `load` expands baseline groups itself when the version is a `MetacelloVersionSpec` (`packagesForSpecNamed:` is gone), so `stale_packages`, `not_reloaded_packages` and the group hints work on 14;
+  - Pharo 14's Tonel loader installs a method that does not compile instead of failing the load; `load` now fails (as on 13) when a load leaves new faulty methods, naming the first one;
+  - `OSEnvironment current` instead of the deprecated `Smalltalk os environment`.
+- The init scripts and `tests/e2e.sh` run on both versions; the e2e suite gained checks for the version reporting, `--pharo`, `--vm-arg`, and a template without the `pharo` key, and no longer needs GNU `timeout`/`stat` (macOS).
+
 ## 0.8.3 – runnable documentation and live-object guidance
 - Reorganize the README around installation, first use and a documentation map; move project workflows, lifecycle, compatibility and recovery details into dedicated guides.
 - Add a complete counter repair tutorial and a method-addition example on the same existing object, including actual shortened responses, identity/state checks, regression testing and exported-source verification. The tutorial was executed with Pharo 13 in a disposable instance.

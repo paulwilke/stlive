@@ -139,10 +139,10 @@ StLiveCommands >> compileFailure: e source: source [
 	"A failure with a real message, variable name, line and column for a Opal compile problem."
 	| text pos details |
 	text := [ e messageText ] on: Error do: [ :x | nil ].
-	(e isKindOf: OCUndeclaredVariableWarning)
+	(self isUndeclaredFailure: e)
 		ifTrue: [
 			pos := [ e node start ] on: Error do: [ :x | 1 ].
-			(text isNil or: [ text isEmpty ]) ifTrue: [ text := 'Undeclared variable: ' , ([ e node name ] on: Error do: [ :x | '?' ]) ].
+			(text isNil or: [ text isEmpty or: [ text = 'Undeclared variable' ] ]) ifTrue: [ text := 'Undeclared variable: ' , ([ e node name ] on: Error do: [ :x | '?' ]) ].
 			details := self positionDetails: pos in: source.
 			details at: 'variable' put: ([ e node name asString ] on: Error do: [ :x | nil ]).
 			details at: 'hint' put: 'The variable is not defined in the image (class not loaded? typo?).' ]
@@ -150,7 +150,21 @@ StLiveCommands >> compileFailure: e source: source [
 			pos := [ e location ] on: Error do: [ :x | 1 ].
 			(text isNil or: [ text isEmpty ]) ifTrue: [ text := e description ].
 			details := self positionDetails: pos in: source ].
-	^ StLiveFailure code: ((e isKindOf: OCUndeclaredVariableWarning) ifTrue: [ 'compile_error' ] ifFalse: [ 'syntax_error' ]) message: text asString details: details
+	^ StLiveFailure code: ((self isUndeclaredFailure: e) ifTrue: [ 'compile_error' ] ifFalse: [ 'syntax_error' ]) message: text asString details: details
+]
+
+{ #category : 'helpers' }
+StLiveCommands >> isUndeclaredFailure: e [
+	"Pharo 13 signals OCUndeclaredVariableWarning from Behavior>>compile:; an OCCodeError carries the notice (Pharo 14 uses it for every compile)."
+	(e isKindOf: OCUndeclaredVariableWarning) ifTrue: [ ^ true ].
+	^ (e isKindOf: OCCodeError) and: [
+		[ e notice isUndeclaredNotice ] on: Error do: [ :x | false ] ]
+]
+
+{ #category : 'helpers' }
+StLiveCommands >> compilationErrorClass [
+	"Pharo 14 signals OCCompilationError (with a list of notices) from Behavior>>compile:; Pharo 13 has no such class."
+	^ Smalltalk globals at: #OCCompilationError ifAbsent: [ OCCodeError ]
 ]
 
 { #category : 'helpers' }
@@ -326,6 +340,7 @@ StLiveCommands >> cmdStatus: args [
 	^ self ok: (self m: {
 		'epoch' -> server epoch.
 		'pharo' -> SystemVersion current version.
+		'pharo_major' -> SystemVersion current major.
 		'image' -> Smalltalk imageFile fullName.
 		'uptime_seconds' -> (DateAndTime now - server startedAt) asSeconds.
 		'suspended_sessions' -> (server sessions values count: [ :s | s isSuspended ]).
@@ -361,6 +376,7 @@ StLiveCommands >> cmdImageInfo: args [
 	^ self ok: (self m: {
 		'epoch' -> server epoch.
 		'pharo' -> SystemVersion current version.
+		'pharo_major' -> SystemVersion current major.
 		'image' -> Smalltalk imageFile fullName.
 		'image_size_mb' -> (Smalltalk imageFile size // 1000000).
 		'vm' -> (Smalltalk vm getSystemAttribute: 0).
@@ -434,13 +450,36 @@ StLiveCommands >> packageNamesOfVersion: version [
 ]
 
 { #category : 'baselines' }
+StLiveCommands >> packageNamesOfSpecNamed: specName in: version [
+	"Names of the packages Metacello loads for a package or group name (groups that include groups are expanded).
+	Pharo 13 answers a MetacelloVersion that knows packagesForSpecNamed:; in Pharo 14 the version is a MetacelloVersionSpec and the groups are expanded here."
+	| names todo seen |
+	(version respondsTo: #packagesForSpecNamed:) ifTrue: [
+		^ (version packagesForSpecNamed: specName) collect: [ :p | p name asString ] ].
+	names := OrderedCollection new.
+	seen := Set new.
+	todo := OrderedCollection with: specName asString.
+	[ todo isEmpty ] whileFalse: [
+		| n spec |
+		n := todo removeFirst.
+		(seen includes: n) ifFalse: [
+			seen add: n.
+			spec := version packageNamed: n ifAbsent: [ nil ].
+			spec ifNotNil: [
+				spec class name = #MetacelloGroupSpec
+					ifTrue: [ todo addAll: (spec includes collect: #asString) ]
+					ifFalse: [ names add: n ] ] ] ].
+	^ names
+]
+
+{ #category : 'baselines' }
 StLiveCommands >> groupMembershipsOf: version [
 	"Group name -> set of the package names Metacello loads for that group (groups that include groups are expanded)."
 	| memberships |
 	memberships := OrderedDictionary new.
 	version ifNotNil: [
 		[ version groups do: [ :g |
-			memberships at: g name asString put: ((version packagesForSpecNamed: g name) collect: [ :p | p name asString ]) asSet ] ]
+			memberships at: g name asString put: (self packageNamesOfSpecNamed: g name in: version) asSet ] ]
 			on: Error do: [ :e | nil ] ].
 	^ memberships
 ]
@@ -453,7 +492,7 @@ StLiveCommands >> packagesLoadedForGroups: groupNames version: version [
 	todo := OrderedCollection new.
 	version ifNil: [ ^ names ].
 	(groupNames isEmpty ifTrue: [ #( 'default' ) ] ifFalse: [ groupNames ]) do: [ :g |
-		todo addAll: ([ (version packagesForSpecNamed: g) collect: [ :p | p name asString ] ] on: Error do: [ #() ]) ].
+		todo addAll: ([ self packageNamesOfSpecNamed: g in: version ] on: Error do: [ #() ]) ].
 	[ todo isEmpty ] whileFalse: [
 		| n required |
 		n := todo removeFirst.
@@ -518,6 +557,32 @@ StLiveCommands >> undeclaredReferencesIn: packageNames [
 ]
 
 { #category : 'baselines' }
+StLiveCommands >> faultyMethodsIn: packageNames [
+	"Methods of these packages that did not compile (faulty methods). Pharo 14's Tonel loader installs such a method
+	instead of failing the load, as Pharo 13 did."
+	| faulty |
+	faulty := IdentitySet new.
+	packageNames do: [ :packageName |
+		(PackageOrganizer default packageNamed: packageName ifAbsent: [ nil ]) ifNotNil: [ :pk |
+			pk methods do: [ :m |
+				(m respondsTo: #isFaulty) ifTrue: [
+					([ m isFaulty ] on: Error do: [ :e | false ]) ifTrue: [ faulty add: m ] ] ] ] ].
+	^ faulty
+]
+
+{ #category : 'baselines' }
+StLiveCommands >> failOnNewFaultyMethodsIn: packageNames since: before [
+	"A load that left methods which do not compile fails, as it does on Pharo 13 where the loader raises the compile error."
+	| new first messages |
+	new := (self faultyMethodsIn: packageNames) reject: [ :m | before includes: m ].
+	new isEmpty ifTrue: [ ^ self ].
+	first := new asArray first.
+	messages := [ first ast allChildren select: [ :n | n isParseError ] thenCollect: [ :n | n errorMessage ] ] on: Error do: [ :e | #() ].
+	self error: (messages isEmpty ifTrue: [ 'Method does not compile' ] ifFalse: [ messages last ]) , ' (in ' , first printString
+		, (new size > 1 ifTrue: [ '; ' , (new size - 1) printString , ' more faulty method(s)' ] ifFalse: [ '' ]) , ')'
+]
+
+{ #category : 'baselines' }
 StLiveCommands >> packagesListedByOtherBaselinesThan: name [
 	| names own |
 	names := Set new.
@@ -579,8 +644,9 @@ StLiveCommands >> cmdLoadBaseline: args [
 	before := (PackageOrganizer default packages collect: [ :p | p name ]) asSet.
 	response := self
 		runBlock: [
-			| loader added refreshed superseded version current memberships requested stale notReloaded pruned touched undeclared |
+			| loader added refreshed superseded version current memberships requested stale notReloaded pruned touched undeclared faultyBefore |
 			loader := Metacello new baseline: name; repository: repository; yourself.
+			faultyBefore := self faultyMethodsIn: known.
 			[ server suppressRecordingDuring: [
 				[ refreshed := self refreshBaselinePackage: name repository: repository.
 				groups isEmpty ifTrue: [ loader load ] ifFalse: [ loader load: groups ] ]
@@ -598,6 +664,7 @@ StLiveCommands >> cmdLoadBaseline: args [
 			requested := self packagesLoadedForGroups: groups version: version.
 			touched := (requested asSet addAll: added; yourself) asArray.
 			undeclared := self undeclaredReferencesIn: touched.
+			self failOnNewFaultyMethodsIn: touched since: faultyBefore.
 			stale := self stalePackagesOf: known current: current.
 			notReloaded := self notReloadedPackagesOf: current requested: requested memberships: memberships.
 			pruned := prune
@@ -1098,12 +1165,13 @@ StLiveCommands >> compileMethod: args [
 	cls := self classNamed: (self need: 'class' in: args).
 	source := self lf: (self need: 'source' in: args) trimRight.
 	crSource := source copyReplaceAll: String lf with: String cr.
-	selector := [ (OpalCompiler new source: crSource; class: cls; parse) selector ]
+	"Compiled once without installing it: syntax errors and undeclared names both arrive as OCCodeError (Pharo 13 and 14)."
+	selector := [ (OpalCompiler new source: crSource; class: cls; compile) selector ]
 		on: OCCodeError do: [ :e | ^ (self compileFailure: e source: source) signal ].
 	old := cls compiledMethodAt: selector ifAbsent: [ nil ].
 	protocol := args at: 'protocol' ifAbsent: [ old ifNil: [ 'as yet unclassified' ] ifNotNil: [ :o | o protocol name ] ].
 	new := [ server suppressRecordingDuring: [ cls compile: crSource classified: protocol ] ]
-		on: OCCodeError, OCUndeclaredVariableWarning
+		on: OCCodeError, OCUndeclaredVariableWarning, self compilationErrorClass
 		do: [ :e | ^ (self compileFailure: e source: source) signal ].
 	new isNil ifTrue: [ self fail: 'compile_error' message: 'Compilation failed' ].
 	entry := self m: {
