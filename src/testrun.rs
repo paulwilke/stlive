@@ -244,15 +244,12 @@ pub fn load_problem(baseline: &str, resp: &Value) -> Option<String> {
         ));
     }
     let warnings: Vec<Value> = resp["result"]["loaded"]["warnings"].as_array().cloned().unwrap_or_default();
-    match warnings.first() {
-        None => None,
-        Some(first) => Some(format!(
+    warnings.first().map(|first| format!(
             "Loading {} reported {} warning(s), first: {}",
             baseline,
             warnings.len(),
             first["message"].as_str().unwrap_or("?")
-        )),
-    }
+        ))
 }
 
 /// Names of all packages in the image, sorted.

@@ -564,7 +564,9 @@ fn label_of(cmd: &Cmd) -> String {
     let mut parts: Vec<String> = Vec::new();
     let mut cur = String::new();
     for c in d.chars() {
-        if c.is_alphanumeric() { cur.push(c); } else { if !cur.is_empty() { parts.push(std::mem::take(&mut cur)); } if c == ' ' || c == '{' { break; } }
+        if c.is_alphanumeric() { cur.push(c); } else {
+            if !cur.is_empty() { parts.push(std::mem::take(&mut cur)); }
+            if c == ' ' || c == '{' { break; } }
     }
     if !cur.is_empty() { parts.push(cur); }
     parts.truncate(2);
@@ -730,6 +732,7 @@ fn summarize(cmd: &str, args: &Value) -> String {
 }
 
 /// One JSON line per call: metadata and a 60-character summary of the call (no full code).
+#[allow(clippy::too_many_arguments)] // one call site; a struct would only rename the arguments
 fn write_log(path: &Path, tag: Option<&str>, instance: &str, cmd: &str, summary: &str, dur: Duration, resp: &Value, exit: i32) {
     let r = &resp["result"];
     let e = &resp["error"];
@@ -1438,65 +1441,6 @@ fn main() {
     std::process::exit(exit_code_for(&resp));
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn skipped_tests_fail_only_with_the_flag() {
-        let green = json!({"ok": true, "result": {"ran": 3, "passed": 2, "failed": 0, "skipped": 1}});
-        assert_eq!(exit_code_with(&green, false), 0);
-        assert_eq!(exit_code_with(&green, true), 1);
-        let red = json!({"ok": true, "result": {"ran": 3, "passed": 2, "failed": 1}});
-        assert_eq!(exit_code_with(&red, false), 1);
-        // an old image that does not report `skipped` at all
-        let old = json!({"ok": true, "result": {"ran": 3, "passed": 3, "failed": 0}});
-        assert_eq!(exit_code_with(&old, true), 0);
-        assert_eq!(exit_code_with(&json!({"ok": false, "error": {}}), false), 1);
-    }
-
-    #[test]
-    fn baseline_source_lists_its_packages_in_every_group() {
-        let src = "Class {\n\t#name : 'BaselineOfDemo',\n\t#package : 'BaselineOfDemo'\n}\n\
-            BaselineOfDemo >> baseline: spec [\n\t<baseline>\n\tspec for: #common do: [\n\
-            \t\tspec package: 'Demo'.\n\t\tspec package: 'Demo-Tests' with: [ spec requires: #('Demo') ] ].\n\
-            \tspec group: 'default' with: #('Demo').\n\tspec subpackage: 'NotMine'\n]\n";
-        // group lines, #package : (Tonel class and package keys) and `subpackage:` are not package lists
-        assert_eq!(baseline_listed_packages(src), vec!["Demo".to_string(), "Demo-Tests".to_string()]);
-        assert_eq!(baseline_listed_packages("spec package:'Tight'"), vec!["Tight".to_string()]);
-        assert!(baseline_listed_packages("spec packages: #('A' 'B')").is_empty());
-    }
-
-    #[test]
-    fn a_listed_loaded_package_without_folder_is_missing() {
-        let mut listed: std::collections::BTreeMap<String, Vec<String>> = Default::default();
-        listed.insert("Demo".into(), vec!["BaselineOfDemo".into()]);
-        listed.insert("Demo-Tests".into(), vec!["BaselineOfDemo".into()]);
-        listed.insert("Gone".into(), vec!["BaselineOfDemo".into(), "BaselineOfOther".into()]);
-        listed.insert("NotLoaded".into(), vec!["BaselineOfDemo".into()]);
-        let folders = vec!["Demo".to_string(), "Demo-Tests".to_string()];
-        let loaded = vec!["Demo".to_string(), "Gone".to_string()];
-        let missing = missing_in_files(&listed, &folders, &loaded);
-        assert_eq!(missing, vec![json!({"package": "Gone", "listed_by": ["BaselineOfDemo", "BaselineOfOther"]})]);
-        // with the folder present nothing is missing; nothing loaded means nothing to report
-        assert!(missing_in_files(&listed, &["Gone".to_string()], &[]).is_empty());
-    }
-
-    #[test]
-    fn baseline_folders_are_read_from_disk() {
-        let dir = std::env::temp_dir().join(format!("stlive-baselines-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(dir.join("BaselineOfX")).unwrap();
-        std::fs::create_dir_all(dir.join("X")).unwrap();
-        std::fs::write(dir.join("BaselineOfX/BaselineOfX.class.st"), "spec package: 'X'.\nspec package: 'X-Gone'.\n").unwrap();
-        std::fs::write(dir.join("X/X.class.st"), "package: 'Not a baseline'").unwrap();
-        let listed = baseline_listed_packages_in(&dir);
-        let _ = std::fs::remove_dir_all(&dir);
-        assert_eq!(listed.get("X-Gone"), Some(&vec!["BaselineOfX".to_string()]));
-        assert_eq!(listed.get("X").map(|v| v.len()), Some(1));
-        assert!(!listed.contains_key("Not a baseline"));
-    }
-}
 
 /// Open `url` in a chromeless application window (Chrome/Edge `--app=`), the web-UI way of "developing a window".
 fn open_ui(url: &str, browser: Option<String>, pretty: bool) {
@@ -1638,7 +1582,7 @@ fn baseline_listed_packages(source: &str) -> Vec<String> {
     while let Some(i) = rest.find(KEY) {
         let head = &rest[..i];
         let tail = &rest[i + KEY.len()..];
-        let word_start = head.chars().last().map_or(true, |c| !(c.is_alphanumeric() || c == '_'));
+        let word_start = head.chars().last().is_none_or(|c| !(c.is_alphanumeric() || c == '_'));
         if word_start {
             if let Some(quoted) = tail.trim_start().strip_prefix('\'') {
                 if let Some(end) = quoted.find('\'') {
@@ -1844,4 +1788,64 @@ fn run_program(inst: &Instance, load: Vec<PathBuf>, packages: Vec<String>, prepa
         eprintln!("stlive run: work directory kept: {}", dir.display());
     }
     std::process::exit(code);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn skipped_tests_fail_only_with_the_flag() {
+        let green = json!({"ok": true, "result": {"ran": 3, "passed": 2, "failed": 0, "skipped": 1}});
+        assert_eq!(exit_code_with(&green, false), 0);
+        assert_eq!(exit_code_with(&green, true), 1);
+        let red = json!({"ok": true, "result": {"ran": 3, "passed": 2, "failed": 1}});
+        assert_eq!(exit_code_with(&red, false), 1);
+        // an old image that does not report `skipped` at all
+        let old = json!({"ok": true, "result": {"ran": 3, "passed": 3, "failed": 0}});
+        assert_eq!(exit_code_with(&old, true), 0);
+        assert_eq!(exit_code_with(&json!({"ok": false, "error": {}}), false), 1);
+    }
+
+    #[test]
+    fn baseline_source_lists_its_packages_in_every_group() {
+        let src = "Class {\n\t#name : 'BaselineOfDemo',\n\t#package : 'BaselineOfDemo'\n}\n\
+            BaselineOfDemo >> baseline: spec [\n\t<baseline>\n\tspec for: #common do: [\n\
+            \t\tspec package: 'Demo'.\n\t\tspec package: 'Demo-Tests' with: [ spec requires: #('Demo') ] ].\n\
+            \tspec group: 'default' with: #('Demo').\n\tspec subpackage: 'NotMine'\n]\n";
+        // group lines, #package : (Tonel class and package keys) and `subpackage:` are not package lists
+        assert_eq!(baseline_listed_packages(src), vec!["Demo".to_string(), "Demo-Tests".to_string()]);
+        assert_eq!(baseline_listed_packages("spec package:'Tight'"), vec!["Tight".to_string()]);
+        assert!(baseline_listed_packages("spec packages: #('A' 'B')").is_empty());
+    }
+
+    #[test]
+    fn a_listed_loaded_package_without_folder_is_missing() {
+        let mut listed: std::collections::BTreeMap<String, Vec<String>> = Default::default();
+        listed.insert("Demo".into(), vec!["BaselineOfDemo".into()]);
+        listed.insert("Demo-Tests".into(), vec!["BaselineOfDemo".into()]);
+        listed.insert("Gone".into(), vec!["BaselineOfDemo".into(), "BaselineOfOther".into()]);
+        listed.insert("NotLoaded".into(), vec!["BaselineOfDemo".into()]);
+        let folders = vec!["Demo".to_string(), "Demo-Tests".to_string()];
+        let loaded = vec!["Demo".to_string(), "Gone".to_string()];
+        let missing = missing_in_files(&listed, &folders, &loaded);
+        assert_eq!(missing, vec![json!({"package": "Gone", "listed_by": ["BaselineOfDemo", "BaselineOfOther"]})]);
+        // with the folder present nothing is missing; nothing loaded means nothing to report
+        assert!(missing_in_files(&listed, &["Gone".to_string()], &[]).is_empty());
+    }
+
+    #[test]
+    fn baseline_folders_are_read_from_disk() {
+        let dir = std::env::temp_dir().join(format!("stlive-baselines-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("BaselineOfX")).unwrap();
+        std::fs::create_dir_all(dir.join("X")).unwrap();
+        std::fs::write(dir.join("BaselineOfX/BaselineOfX.class.st"), "spec package: 'X'.\nspec package: 'X-Gone'.\n").unwrap();
+        std::fs::write(dir.join("X/X.class.st"), "package: 'Not a baseline'").unwrap();
+        let listed = baseline_listed_packages_in(&dir);
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(listed.get("X-Gone"), Some(&vec!["BaselineOfX".to_string()]));
+        assert_eq!(listed.get("X").map(|v| v.len()), Some(1));
+        assert!(!listed.contains_key("Not a baseline"));
+    }
 }

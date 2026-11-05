@@ -290,7 +290,7 @@ fn patch_class_definition(text: &str, c: &Value, symbol_style: bool, package: &s
     ];
     let vars_changed = wanted.iter().any(|(k, v)| &listed(block, k) != v);
     let prefix = &text[..start];
-    let comment_changed = c["comment"].as_str().map_or(false, |image| norm(image).trim() != comment_of_block(prefix));
+    let comment_changed = c["comment"].as_str().is_some_and(|image| norm(image).trim() != comment_of_block(prefix));
     if !vars_changed && !comment_changed {
         return None;
     }
@@ -553,7 +553,7 @@ pub fn drift(image: &Value, package: &str, dir: &Path) -> Value {
     let label = |k: &str| { let p: Vec<&str> = k.split('|').collect(); if p[1] == "class" { format!("{} class>>{}", p[0], p[2]) } else { format!("{}>>{}", p[0], p[2]) } };
     let missing_in_files: Vec<String> = in_image.keys().filter(|k| !in_files.contains_key(*k)).map(|k| label(k)).collect();
     let missing_in_image: Vec<String> = in_files.keys().filter(|k| !in_image.contains_key(*k)).map(|k| label(k)).collect();
-    let different: Vec<String> = in_image.iter().filter(|(k, v)| in_files.get(*k).map(|f| &normalise(f) != &normalise(v)).unwrap_or(false)).map(|(k, _)| label(k)).collect();
+    let different: Vec<String> = in_image.iter().filter(|(k, v)| in_files.get(*k).map(|f| normalise(f) != normalise(v)).unwrap_or(false)).map(|(k, _)| label(k)).collect();
     let names = |key: &str| -> Vec<String> { image[key].as_array().map(|a| a.iter().filter_map(|c| c.as_str().map(String::from)).collect()).unwrap_or_default() };
     // images before 0.7 list traits under `classes`; the files decide whether a name is a class or a trait
     let mut image_classes: Vec<String> = names("classes");
