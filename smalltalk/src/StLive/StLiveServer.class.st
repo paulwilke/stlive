@@ -80,7 +80,7 @@ StLiveServer class >> startFromEnvironment [
 	"STLIVE_PORTFILE: where to publish {port, epoch}. Without it the port is only printed. The result goes to the
 	instance log (the image's stdout), so a start that does not publish a port can be explained from the log."
 	| env path port |
-	env := Smalltalk os environment.
+	env := OSEnvironment current.
 	path := env at: 'STLIVE_PORTFILE' ifAbsent: [ nil ].
 	port := self current startPortFile: path.
 	"the server runs already: a failure to log this must not end the start"
@@ -205,17 +205,39 @@ StLiveServer >> installBackgroundErrorHandler [
 	"Headless images quit on an unhandled error in any process without its own handler (the default handler is
 	the NonInteractiveUIManager). Replace it while the server runs. A GUI image keeps its debugger."
 	| current |
-	current := ErrorHandler defaultErrorHandler.
+	current := self systemErrorHandler.
 	(current isKindOf: StLiveBackgroundErrorHandler) ifTrue: [ ^ self ].
-	(current isKindOf: MorphicUIManager) ifTrue: [ ^ self ].
+	(self isInteractiveErrorHandler: current) ifTrue: [ ^ self ].
 	previousErrorHandler := current.
-	ErrorHandler defaultErrorHandler: (StLiveBackgroundErrorHandler new server: self fallback: current; yourself)
+	self systemErrorHandler: (StLiveBackgroundErrorHandler new server: self fallback: current; yourself)
 ]
 
 { #category : 'background errors' }
 StLiveServer >> uninstallBackgroundErrorHandler [
-	(ErrorHandler defaultErrorHandler isKindOf: StLiveBackgroundErrorHandler)
-		ifTrue: [ ErrorHandler defaultErrorHandler: previousErrorHandler ]
+	(self systemErrorHandler isKindOf: StLiveBackgroundErrorHandler)
+		ifTrue: [ self systemErrorHandler: previousErrorHandler ]
+]
+
+{ #category : 'background errors' }
+StLiveServer >> systemErrorHandler [
+	"The image's handler for errors in processes without their own: ErrorHandler default (Pharo 14), ErrorHandler defaultErrorHandler (Pharo 13)."
+	^ (ErrorHandler respondsTo: #default)
+		ifTrue: [ ErrorHandler default ]
+		ifFalse: [ ErrorHandler defaultErrorHandler ]
+]
+
+{ #category : 'background errors' }
+StLiveServer >> systemErrorHandler: aHandler [
+	(ErrorHandler respondsTo: #default:)
+		ifTrue: [ ErrorHandler default: aHandler ]
+		ifFalse: [ ErrorHandler defaultErrorHandler: aHandler ]
+]
+
+{ #category : 'background errors' }
+StLiveServer >> isInteractiveErrorHandler: aHandler [
+	"A GUI image keeps its debugger: Morphic's handler (Pharo 14: MorphicErrorHandler / InteractiveErrorHandler, Pharo 13: MorphicUIManager)."
+	^ #(#MorphicErrorHandler #InteractiveErrorHandler #MorphicUIManager) anySatisfy: [ :name |
+		(Smalltalk globals at: name ifAbsent: [ nil ]) ifNil: [ false ] ifNotNil: [ :class | aHandler isKindOf: class ] ]
 ]
 
 { #category : 'references' }
@@ -374,6 +396,7 @@ StLiveServer >> writePortFile: aPath port: aPort [
 			at: 'port' put: aPort;
 			at: 'epoch' put: epoch;
 			at: 'pharo' put: SystemVersion current version;
+			at: 'pharo_major' put: SystemVersion current major;
 			yourself)) ]
 ]
 

@@ -8,6 +8,8 @@ WORK=$(mktemp -d); cd "$WORK"
 export STLIVE_DIR="$WORK/.stlive"
 export STLIVE_HOME="${STLIVE_HOME:-$HOME/.stlive}"   # the template; STLIVE_DIR alone would be used as home (0.7)
 pass=0; fail=0
+command -v timeout >/dev/null 2>&1 || timeout() { local s=$1; shift; perl -e 'alarm shift; exec @ARGV' "$s" "$@"; }   # macOS has no GNU timeout
+mtime() { stat -c %Y "$1" 2>/dev/null || stat -f %m "$1"; }
 check() { # check <description> <jq filter on $out> [expected]
   local desc=$1 filter=$2 expected=${3:-true}
   local got; got=$(echo "$out" | jq -r "$filter" 2>/dev/null)
@@ -240,7 +242,7 @@ E2EBadThing >> broken [
 ST
 out=$($S test run --fresh --load E2EBad --repository "tonel://$WORK/freshbad"); RC=$?
 check "fresh: a compile error fails with load_failed" '.error.code' load_failed
-check "fresh: the load error shows the compile error" '.error.load_error.message' "Variable or expression expected"
+check "fresh: the load error shows the compile error" '.error.load_error.message|contains("Variable or expression expected")' true
 [ "$RC" -eq 6 ] && { pass=$((pass+1)); echo "ok   - fresh: failed load exits 6"; } || { fail=$((fail+1)); echo "FAIL - failed load exit code $RC"; }
 out=$($S test run --fresh --keep --load E2EFresh --repository "tonel://$WORK/freshsrc"); RC=$?
 KEPT=$(echo "$out" | jq -r .result.instance)
@@ -653,11 +655,13 @@ out=$($S instances --prune-temporary); check "prune removes the orphaned kept in
 # directory `start` names (the image registers the baseline from there). The group is the framework (the same sources
 # the start has just loaded) plus StLive-Tests; the summary of this load names what was added. start leaves the
 # template's own copy (home/src, written by init) alone.
-HOME_MT=$(stat -c %Y "$STLIVE_HOME/src/StLive/StLiveCommands.class.st")
+HOME_MT=$(mtime "$STLIVE_HOME/src/StLive/StLiveCommands.class.st")
 $S stop --force >/dev/null
 out=$($S start); SRC=$(echo "$out" | jq -r .result.sources)
 check "start names the sources directory of this binary" '.result.sources|test("/src-[0-9a-f]+$")' true
-[ "$(stat -c %Y "$STLIVE_HOME/src/StLive/StLiveCommands.class.st")" = "$HOME_MT" ] && { pass=$((pass+1)); echo "ok   - start leaves the template's src alone"; } || { fail=$((fail+1)); echo "FAIL - start rewrote the template's src"; }
+[ "$(mtime "$STLIVE_HOME/src/StLive/StLiveCommands.class.st")" = "$HOME_MT" ] && { pass=$((pass+1)); echo "ok   - start leaves the template's src alone"; } || { fail=$((fail+1)); echo "FAIL - start rewrote the template's src"; }
+# a template made by this very binary registered the baseline from home/src (no upgrade ran at start): register this directory first
+$S eval "Metacello new baseline: 'StLive'; repository: 'tonel://$SRC'; onConflictUseIncoming; load. 1" --timeout 300000 >/dev/null
 out=$($S load StLive --repository "tonel://$SRC" --group Tests); check "StLive-Tests loaded with the Tests group" '.result.loaded.new_packages|contains(["StLive-Tests"])'
 out=$($S test run StLive-Tests); check "StLive-Tests: no failing test" '.result.failed' 0
 check "StLive-Tests: more than 100 tests ran" '.result.ran>100'

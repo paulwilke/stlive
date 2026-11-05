@@ -24,7 +24,7 @@ StLiveRun class >> beginIn: aDirectoryPath [
 	out := WriteStream on: String new.
 	err := WriteStream on: String new.
 	exitCode := 0.
-	env := Smalltalk os environment.
+	env := OSEnvironment current.
 	arguments := (STON fromString: (env at: 'STLIVE_RUN_ARGS' ifAbsent: [ '[]' ])) asArray collect: [ :a | a asString ]
 ]
 

@@ -8,7 +8,7 @@
 //! `stlive start` makes), the baseline is loaded (`load.baseline`), the tests run, and the instance is stopped and
 //! its files deleted. `--keep` leaves it running; its name is in the output.
 
-use crate::{call, emit_inner, exit_code_for, log_response, opt, platform, start_quiet, stop_quiet, try_call, Instance};
+use crate::{StartOpts, call, emit_inner, exit_code_for, log_response, opt, platform, start_quiet, stop_quiet, try_call, Instance};
 use serde_json::{json, Map, Value};
 use signal_hook::consts::{SIGINT, SIGTERM};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -34,6 +34,7 @@ pub struct FreshSpec {
     pub groups: Vec<String>,
     pub keep: bool,
     pub load_timeout: Option<u64>,
+    pub pharo: Option<u32>,
 }
 
 /// A step that failed: exit code, error code, message, and more fields of the error object.
@@ -436,7 +437,7 @@ pub fn fresh_test_run(base: &Instance, spec: FreshSpec, targets: Vec<String>, op
     if let Err(e) = watch_interrupts(&inst, pretty) {
         eprintln!("stlive: cannot catch interrupts ({}); an interrupted run may leave {} running", e, name);
     }
-    if let Err(e) = start_quiet(&inst, None, None, false) {
+    if let Err(e) = start_quiet(&inst, StartOpts { pharo: spec.pharo, ..Default::default() }) {
         let f = from_try(e);
         end(&inst, false, f.code, &fail_response(&f), pretty);
     }

@@ -201,7 +201,10 @@ StLiveDescriber >> variableKinds: aContext [
 StLiveDescriber >> variables: aContext [
 	"Array of { name, kind, scope } + value summary; the frame's own variables come first."
 	| names kinds all |
-	names := [ aContext tempNames ] on: Error do: [ :e | #() ].
+	"Context>>tempNames is gone in Pharo 14 (temporaryVariableNames)."
+	names := [ (aContext respondsTo: #temporaryVariableNames)
+		ifTrue: [ aContext temporaryVariableNames ]
+		ifFalse: [ aContext tempNames ] ] on: Error do: [ :e | #() ].
 	kinds := self variableKinds: aContext.
 	all := names collect: [ :name |
 		| m info |

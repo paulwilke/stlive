@@ -51,8 +51,11 @@ struct Cli {
 
 #[derive(Subcommand, Debug)]
 enum Cmd {
-    /// One-time setup: download Pharo 13 and build an image with the StLive server
+    /// One-time setup: download Pharo (14 by default, or --pharo 13) and build an image with the StLive server
     Init {
+        /// Pharo major version to download and build: 13 or 14 (default: the version of the existing default template, else 14). A second version is installed beside the default one
+        #[arg(long)]
+        pharo: Option<u32>,
         /// Re-download and rebuild even if present
         #[arg(long)]
         force: bool,
@@ -71,6 +74,9 @@ enum Cmd {
         /// Process id of that image (found automatically if omitted (lsof or netstat))
         #[arg(long)]
         pid: Option<i32>,
+        /// Pharo major version of that image (default: asked from the running image)
+        #[arg(long)]
+        pharo: Option<u32>,
     },
     /// List instances known in the state directory. Temporary ones (from `test run --fresh`) are marked, and so are
     /// the orphaned ones: their run is gone, or their image died.
@@ -90,6 +96,15 @@ enum Cmd {
         /// Start Pharo WITH its window (Morphic/Spec/Bloc development) instead of headless; everything else is the same
         #[arg(long)]
         gui: bool,
+        /// Start with `--worker --headless` (worker-process mode, for Spec-Gtk style development). Opt-in and unverified; plain headless keeps the image alive on Pharo 13 and 14
+        #[arg(long, conflicts_with = "gui")]
+        gtk: bool,
+        /// Extra VM option placed before the image (repeatable), e.g. --vm-arg=--worker. Not remembered
+        #[arg(long = "vm-arg", allow_hyphen_values = true)]
+        vm_args: Vec<String>,
+        /// Use the template of this Pharo major version (installed with `init --pharo N`). Default: the version this instance remembers, else the default template
+        #[arg(long)]
+        pharo: Option<u32>,
     },
     /// Stop the image (destructive: unsaved state and debug sessions are lost)
     Stop {
@@ -201,6 +216,9 @@ enum Cmd {
         /// Keep the work directory (image, logs) for inspection
         #[arg(long)]
         keep: bool,
+        /// Use the template of this Pharo major version (default: the default template)
+        #[arg(long)]
+        pharo: Option<u32>,
         /// Arguments for the program: read them with `StLiveRun arguments`
         #[arg(last = true)]
         args: Vec<String>,
@@ -389,6 +407,9 @@ enum TestCmd {
         /// With --fresh: milliseconds the baseline load may take (default 600000)
         #[arg(long, requires = "fresh")]
         load_timeout: Option<u64>,
+        /// With --fresh: Pharo major version of the template to use (default: the default template)
+        #[arg(long, requires = "fresh")]
+        pharo: Option<u32>,
     },
 }
 
@@ -815,6 +836,7 @@ fn list_instances(inst: &Instance, prune_temporary: bool, pretty: bool) {
         let orphaned = temporary && testrun::is_orphaned(&i);
         list.push(json!({
             "name": n,
+            "pharo": std::fs::read_to_string(i.path("config.json")).ok().and_then(|t| serde_json::from_str::<Value>(&t).ok()).map(|c| c["pharo"].clone()),
             "running": i.alive() && info.is_some(),
             "port": info.as_ref().map(|x| x["port"].clone()),
             "pid": i.pid(),
@@ -830,8 +852,26 @@ fn list_instances(inst: &Instance, prune_temporary: bool, pretty: bool) {
     emit(&json!({"ok": true, "result": {"state_dir": inst.dir, "instances": list, "pruned": pruned}}), pretty);
 }
 
-fn start(inst: &Instance, vm: Option<PathBuf>, image: Option<PathBuf>, gui: bool, pretty: bool) {
-    match start_quiet(inst, vm, image, gui) {
+/// How `start` was asked to start an instance.
+#[derive(Default)]
+pub struct StartOpts {
+    pub vm: Option<PathBuf>,
+    pub image: Option<PathBuf>,
+    pub gui: bool,
+    pub gtk: bool,
+    pub vm_args: Vec<String>,
+    pub pharo: Option<u32>,
+}
+
+fn not_initialized_message(pharo: Option<u32>) -> String {
+    match pharo {
+        Some(n) => format!("No Pharo {n} template yet. Run `stlive init --pharo {n}` once (downloads Pharo {n} and builds the image), or pass --vm and --image.", n = n),
+        None => "No Pharo set up yet. Run `stlive init` once (downloads Pharo and builds the image; `--pharo 13` or `--pharo 14` picks the version), or pass --vm and --image.".into(),
+    }
+}
+
+fn start(inst: &Instance, opts: StartOpts, pretty: bool) {
+    match start_quiet(inst, opts) {
         Ok(result) => emit(&json!({"ok": true, "result": result}), pretty),
         Err((code, err, msg)) => die(code, err, msg, pretty),
     }
@@ -839,7 +879,12 @@ fn start(inst: &Instance, vm: Option<PathBuf>, image: Option<PathBuf>, gui: bool
 
 /// Start an instance and wait for its port. `Err((exit code, error code, message))` instead of exiting, so the
 /// fresh test run can start a temporary instance the same way (image copy from the template included).
-fn start_quiet(inst: &Instance, vm: Option<PathBuf>, image: Option<PathBuf>, gui: bool) -> Result<Value, (i32, &'static str, String)> {
+///
+/// The Pharo version decides how the VM is told to keep running (`init::st_serve_args`). It comes from `--pharo`, else
+/// from what the instance remembers (`"pharo"` in its config; an older config is detected from its image now), else
+/// the default template; with `--vm`/`--image` it is detected from the image.
+fn start_quiet(inst: &Instance, opts: StartOpts) -> Result<Value, (i32, &'static str, String)> {
+    let StartOpts { vm, image, gui, gtk, vm_args, pharo } = opts;
     if inst.alive() && inst.port_info().is_some() {
         let r = try_call(inst, "ping", json!({}), Duration::from_secs(3))?;
         if r["ok"] == json!(true) {
@@ -848,25 +893,47 @@ fn start_quiet(inst: &Instance, vm: Option<PathBuf>, image: Option<PathBuf>, gui
     }
     let cfg_path = inst.path("config.json");
     let saved: Value = std::fs::read_to_string(&cfg_path).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or(json!({}));
-    let vm = vm.or_else(|| saved["vm"].as_str().map(PathBuf::from));
-    let image = image.or_else(|| saved["image"].as_str().map(PathBuf::from));
-    let (vm, image) = match (vm, image) {
-        (Some(v), Some(i)) => (v, i),
-        (v, i) => match init::template(&init::home_dir()) {
-            Some((tvm, timg)) => {
+    let saved_vm = saved["vm"].as_str().map(PathBuf::from);
+    let saved_image = saved["image"].as_str().map(PathBuf::from);
+    let saved_version = saved["pharo"].as_u64().map(|n| n as u32).or_else(|| match (&saved_vm, &saved_image) {
+        (Some(v), Some(i)) if i.exists() => init::detect_version(v, i),
+        _ => None,
+    });
+    // --pharo N against an instance whose image is another version: the image cannot change its version
+    let explicit_files = vm.is_some() || image.is_some();
+    let mut use_saved = true;
+    if let (Some(want), Some(have)) = (pharo, saved_version) {
+        if want != have && !explicit_files {
+            if let Some(img) = saved_image.as_ref().filter(|i| i.exists()) {
+                return Err((2, "pharo_mismatch", format!("Instance '{}' runs Pharo {} (image {}); --pharo {} cannot change that. Use another instance name (-i), or stop it and delete its image to start it fresh from the Pharo {} template.", inst.name, have, img.display(), want, want)));
+            }
+            use_saved = false; // its image is gone: rebuilt from the requested version's template
+        }
+    }
+    let wanted = pharo.or(if use_saved { saved_version } else { None });
+    let vm = vm.or(if use_saved { saved_vm } else { None });
+    let image = image.or(if use_saved { saved_image } else { None });
+    let home = init::home_dir();
+    let (vm, image, version) = match (vm, image) {
+        (Some(v), Some(i)) => {
+            let version = wanted.or_else(|| init::detect_version(&v, &i)).ok_or_else(|| (2, "pharo_unknown", format!("Cannot tell which Pharo version {} is; pass --pharo 13 or --pharo 14.", i.display())))?;
+            (v, i, version)
+        }
+        (v, i) => match init::template(&home, wanted) {
+            Some(t) => {
                 let img = match i {
                     Some(i) => i,
-                    None => init::instance_image(&timg, &inst.dir, &inst.name).map_err(|e| (3, "image_copy_failed", e))?,
+                    None => init::instance_image(&t.image, &inst.dir, &inst.name).map_err(|e| (3, "image_copy_failed", e))?,
                 };
-                (v.unwrap_or(tvm), img)
+                (v.unwrap_or(t.vm), img, t.version)
             }
-            None => return Err((2, "not_initialized", "No Pharo set up yet. Run `stlive init` once (downloads Pharo 13 and builds the image), or pass --vm and --image.".into())),
+            None => return Err((2, "not_initialized", not_initialized_message(wanted))),
         },
     };
     // A deleted instance image is rebuilt from the template.
     if !image.exists() && image.parent() == Some(inst.dir.as_path()) {
-        if let Some((_, timg)) = init::template(&init::home_dir()) {
-            let _ = init::instance_image(&timg, &inst.dir, &inst.name);
+        if let Some(t) = init::template(&home, Some(version)) {
+            let _ = init::instance_image(&t.image, &inst.dir, &inst.name);
         }
     }
     let abs = |p: &Path| platform::absolute(p);
@@ -876,22 +943,23 @@ fn start_quiet(inst: &Instance, vm: Option<PathBuf>, image: Option<PathBuf>, gui
     if !inst.dir.join(".gitignore").exists() {
         let _ = std::fs::write(inst.dir.join(".gitignore"), "# created by stlive: local state, never commit\n*\n");
     }
-    let _ = std::fs::write(&cfg_path, json!({"vm": vm, "image": image}).to_string());
+    let _ = std::fs::write(&cfg_path, json!({"vm": vm, "image": image, "pharo": version}).to_string());
     let serve = inst.path("serve.st");
     let _ = std::fs::write(&serve, init::serve_st());
-    let src_dir = init::write_sources(&init::home_dir()).ok();
+    let src_dir = init::write_sources(&home).ok();
     let _ = std::fs::remove_file(inst.path("port.json"));
     // truncated for this start; the image's stdout and our own lines are appended to it (append mode for both)
     let log_path = inst.path("log");
     std::fs::File::create(&log_path).expect("cannot create log file");
     let log = std::fs::OpenOptions::new().append(true).open(&log_path).expect("cannot open log file");
     let mut cmd = Command::new(&vm);
+    // headless | --gui: the window | --gtk: worker process (opt-in, unverified); VM options come before the image
+    let mut mode_args: Vec<String> = if gui { vec![] } else if gtk { vec!["--worker".into(), "--headless".into()] } else { vec!["--headless".into()] };
+    mode_args.extend(vm_args);
     cmd
-        .args(if gui { vec![] } else { vec!["--headless"] })
+        .args(&mode_args)
         .arg(&image)
-        .arg("st")
-        .arg(&serve)
-        .arg("--no-quit")
+        .args(init::st_serve_args(version, &serve))
         .env("STLIVE_PORTFILE", inst.path("port.json"))
         .env("STLIVE_SOURCES_HASH", init::sources_hash())
         .envs(src_dir.iter().map(|d| ("STLIVE_SRC", d.clone())))
@@ -910,7 +978,7 @@ fn start_quiet(inst: &Instance, vm: Option<PathBuf>, image: Option<PathBuf>, gui
     let deadline = Instant::now() + Duration::from_secs(wait_secs);
     while Instant::now() < deadline {
         if let Some(info) = inst.port_info() {
-            return Ok(json!({"started": true, "pid": child.id(), "port": info["port"], "epoch": info["epoch"], "pharo": info["pharo"], "log": log_path, "sources": src_dir}));
+            return Ok(json!({"started": true, "pid": child.id(), "port": info["port"], "epoch": info["epoch"], "pharo": info["pharo"], "pharo_major": version, "log": log_path, "sources": src_dir}));
         }
         // the image quit (serve.st ends it when the server does not start): no point in waiting for the port file
         if matches!(child.try_wait(), Ok(Some(_))) {
@@ -1006,9 +1074,18 @@ fn watch_changes(inst: &Instance, interval: u64, pretty: bool) {
 }
 
 /// Load the StLive server into a running image through its existing JSON-line server.
-fn attach(inst: &Instance, old_port: u16, pid: Option<i32>, pretty: bool) {
+fn attach(inst: &Instance, old_port: u16, pid: Option<i32>, pharo: Option<u32>, pretty: bool) {
     let home = init::home_dir();
-    let packages = match init::system_packages(&home) {
+    let _ = std::fs::create_dir_all(&inst.dir);
+    // the framework package list depends on the image's Pharo version: --pharo, else ask the running image
+    let version = pharo.or_else(|| {
+        let tmp = Instance { dir: inst.dir.clone(), name: "attach-old".into() };
+        let _ = std::fs::write(tmp.path("port.json"), json!({"port": old_port}).to_string());
+        let r = try_call(&tmp, "eval", json!({"code": "SystemVersion current major"}), Duration::from_secs(30));
+        let _ = std::fs::remove_file(tmp.path("port.json"));
+        r.ok().and_then(|r| r["result"]["value"]["print"].as_str().and_then(|s| s.trim().parse().ok()))
+    });
+    let packages = match init::system_packages(&home, version) {
         Some(p) => p,
         None => die(2, "not_initialized", "attach needs the framework package list written by `stlive init` (run it once; it can use your local Pharo with --vm/--image)".into(), pretty),
     };
@@ -1068,9 +1145,9 @@ fn clone_image(inst: &Instance, name: &str, start_it: bool, pretty: bool) {
         die(1, "copy_failed", e.to_string(), pretty);
     }
     let clone_inst = Instance { dir: inst.dir.clone(), name: name.to_string() };
-    let _ = std::fs::write(clone_inst.path("config.json"), json!({"vm": vm, "image": new_image}).to_string());
+    let _ = std::fs::write(clone_inst.path("config.json"), json!({"vm": vm, "image": new_image, "pharo": cfg["pharo"]}).to_string());
     if start_it {
-        return start(&clone_inst, Some(vm), Some(new_image), false, pretty);
+        return start(&clone_inst, StartOpts { vm: Some(vm), image: Some(new_image), ..Default::default() }, pretty);
     }
     emit(&json!({"ok": true, "result": {"instance": name, "image": new_image, "start": format!("stlive -i {} start", name)}}), pretty);
 }
@@ -1087,7 +1164,7 @@ fn main() {
     let inst = Instance { dir: resolve_state_dir(&cli.state_dir, creating), name: cli.instance.clone() };
 
     let (cmd, args, timeout_ms): (String, Value, Option<u64>) = match cli.cmd {
-        Cmd::Attach { port, pid } => return attach(&inst, port, pid, pretty),
+        Cmd::Attach { port, pid, pharo } => return attach(&inst, port, pid, pharo, pretty),
         Cmd::OpenUi { url, browser } => return open_ui(&url, browser, pretty),
         Cmd::Ui(u) => match u {
             UiCmd::Windows => ("ui.windows".into(), json!({}), None),
@@ -1110,15 +1187,15 @@ fn main() {
                 ("ui.press".into(), Value::Object(m), timeout)
             }
         },
-        Cmd::Init { force, vm, image } => {
+        Cmd::Init { pharo, force, vm, image } => {
             let home = init::home_dir();
-            match init::init(&home, force, vm.zip(image)) {
+            match init::init(&home, force, vm.zip(image), pharo) {
                 Ok(r) => return emit(&json!({"ok": true, "result": r}), pretty),
                 Err(e) => die(1, "init_failed", e, pretty),
             }
         }
         Cmd::Instances { prune_temporary } => return list_instances(&inst, prune_temporary, pretty),
-        Cmd::Start { vm, image, gui } => return start(&inst, vm, image, gui, pretty),
+        Cmd::Start { vm, image, gui, gtk, vm_args, pharo } => return start(&inst, StartOpts { vm, image, gui, gtk, vm_args, pharo }, pretty),
         Cmd::Stop { force } => return stop(&inst, force, pretty),
         Cmd::Status => ("status".into(), json!({}), None),
         Cmd::Ping => ("ping".into(), json!({}), None),
@@ -1256,13 +1333,13 @@ fn main() {
             opt(&mut m, "limit", limit);
             ("find.package".into(), Value::Object(m), None)
         }
-        Cmd::Test(TestCmd::Run { targets, timeout, keep_sessions, discard_sessions, skips_fail, fresh, load, repository, groups, keep, load_timeout }) => {
+        Cmd::Test(TestCmd::Run { targets, timeout, keep_sessions, discard_sessions, skips_fail, fresh, load, repository, groups, keep, load_timeout, pharo }) => {
             SKIPS_FAIL.store(skips_fail, std::sync::atomic::Ordering::Relaxed);
             let opts = TestOpts { timeout, keep_sessions, discard_sessions, skips_fail };
             if fresh {
                 match (load, repository) {
                     (Some(baseline), Some(repository)) => {
-                        let spec = FreshSpec { baseline, repository, groups, keep, load_timeout };
+                        let spec = FreshSpec { baseline, repository, groups, keep, load_timeout, pharo };
                         testrun::fresh_test_run(&inst, spec, targets, opts, pretty)
                     }
                     _ => die(2, "missing_argument", "--fresh needs --load <Baseline> and --repository <URL>".into(), pretty),
@@ -1333,7 +1410,7 @@ fn main() {
         Cmd::Image(ImageCmd::Export { out, keep_server, force }) => return export_image(&inst, &out, keep_server, force, pretty),
         Cmd::Image(ImageCmd::Clone { name, start: do_start }) => return clone_image(&inst, &name, do_start, pretty),
         Cmd::Save { package, all, dir, dry_run, verify } => return save_changes(&inst, package, all, &dir, dry_run, verify, pretty),
-        Cmd::Run { load, packages, prepare, eval, file, timeout, keep, args } => return run_program(&inst, load, packages, prepare, eval, file, timeout, keep, args, pretty),
+        Cmd::Run { load, packages, prepare, eval, file, timeout, keep, pharo, args } => return run_program(&inst, load, packages, prepare, eval, file, timeout, keep, pharo, args, pretty),
         Cmd::Drift { package, all, dir } => return drift_cmd(&inst, package, all, &dir, pretty),
         Cmd::Load { baseline, repository, groups, prune, timeout } => {
             let mut m = Map::new();
@@ -1677,14 +1754,15 @@ fn save_changes(inst: &Instance, package: Option<String>, all: bool, dir: &Path,
 
 /// `stlive run`: fresh image, load Tonel sources, evaluate, pass through stdout/stderr/exit code.
 #[allow(clippy::too_many_arguments)]
-fn run_program(inst: &Instance, load: Vec<PathBuf>, packages: Vec<String>, prepare: Option<PathBuf>, eval: Option<String>, file: Option<PathBuf>, timeout: u64, keep: bool, args: Vec<String>, pretty: bool) {
+fn run_program(inst: &Instance, load: Vec<PathBuf>, packages: Vec<String>, prepare: Option<PathBuf>, eval: Option<String>, file: Option<PathBuf>, timeout: u64, keep: bool, pharo: Option<u32>, args: Vec<String>, pretty: bool) {
     if eval.is_none() && file.is_none() {
         die(2, "missing_argument", "Give --eval '<expression>' or --file <script.st>.".into(), pretty);
     }
-    let (vm, template) = match init::template(&init::home_dir()) {
+    let tpl = match init::template(&init::home_dir(), pharo) {
         Some(t) => t,
-        None => die(2, "not_initialized", "Run `stlive init` once first.".into(), pretty),
+        None => die(2, "not_initialized", not_initialized_message(pharo), pretty),
     };
+    let (vm, template) = (tpl.vm, tpl.image);
     let abs = |p: &Path| platform::absolute(p);
     let ms = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis()).unwrap_or(0);
     let dir = inst.dir.join(format!("run-{}-{}", std::process::id(), ms));

@@ -68,8 +68,12 @@ StLiveTestCase >> fixtureTraitNamed: aString package: aName [
 
 { #category : 'helpers' }
 StLiveTestCase >> compile: aSource in: aClass [
-	"The CompiledMethod (compile:classified: itself answers the selector)."
-	^ self quietly: [ aClass compiledMethodAt: (aClass compile: aSource classified: 'fixtures') ]
+	"The CompiledMethod, installed in aClass. Names nothing defines are allowed (Pharo 13 resumes a warning for them, Pharo 14's compile: fails), so the compiler is asked to permit them."
+	^ self quietly: [
+		| method |
+		method := aClass compiler source: aSource; permitUndeclared: true; compile.
+		aClass addSelector: method selector withMethod: method.
+		aClass compiledMethodAt: method selector ]
 ]
 
 { #category : 'helpers' }
