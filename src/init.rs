@@ -236,11 +236,19 @@ fn major_after_pharo(text: &str) -> Option<u32> {
     if !digits.is_empty() && text[i + digits.len()..].starts_with('.') { digits.parse().ok() } else { None }
 }
 
+/// The Pharo major version of a directory's `PharoNN.x-….sources` files, when they all agree. A directory holding
+/// sources of several versions (side-by-side instances) is ambiguous: `None`, as is a directory without any.
 fn sources_version_in(dir: &Path) -> Option<u32> {
-    std::fs::read_dir(dir).ok()?.flatten().find_map(|e| {
+    let mut versions: Vec<u32> = std::fs::read_dir(dir).ok()?.flatten().filter_map(|e| {
         let n = e.file_name().to_string_lossy().into_owned();
         if n.starts_with("Pharo") && n.ends_with(".sources") { major_after_pharo(&n) } else { None }
-    })
+    }).collect();
+    versions.sort_unstable();
+    versions.dedup();
+    match versions.as_slice() {
+        [v] => Some(*v),
+        _ => None,
+    }
 }
 
 /// Pharo major version of an image: the `PharoNN.x-….sources` file next to it (cheap), then next to the VM, last a
@@ -256,8 +264,23 @@ pub fn detect_version(vm: &Path, image: &Path) -> Option<u32> {
         }
     }
     // `printVersion --release` prints "14.0" / "13.1" on both; the plain form prints "[version] 'Pharo14.0.0' ..."
-    let out = Command::new(vm).arg("--headless").arg(image).arg("printVersion").arg("--release").stdin(Stdio::null()).stderr(Stdio::null()).output().ok()?;
-    String::from_utf8_lossy(&out.stdout).lines().find_map(|l| {
+    // bounded: an image with its own startup actions must not hang `stlive start`/`init`
+    let mut child = Command::new(vm).arg("--headless").arg(image).arg("printVersion").arg("--release").stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null()).spawn().ok()?;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break,
+            Ok(None) if std::time::Instant::now() < deadline => std::thread::sleep(std::time::Duration::from_millis(100)),
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
+            }
+        }
+    }
+    let mut stdout = Vec::new();
+    std::io::Read::read_to_end(&mut child.stdout.take()?, &mut stdout).ok()?;
+    String::from_utf8_lossy(&stdout).lines().find_map(|l| {
         let l = l.trim();
         let digits: String = l.chars().take_while(|c| c.is_ascii_digit()).collect();
         if !digits.is_empty() && l[digits.len()..].starts_with('.') { digits.parse().ok() } else { major_after_pharo(l) }
@@ -474,6 +497,19 @@ mod tests {
         assert_eq!(major_after_pharo("[version] 'Pharo13.1.0' 'Pharo-13.1.0+SNAPSHOT'"), Some(13));
         assert_eq!(major_after_pharo("Pharo.image"), None);
         assert_eq!(major_after_pharo("nothing"), None);
+    }
+
+    #[test]
+    fn a_directory_with_sources_of_two_versions_has_no_version() {
+        let dir = std::env::temp_dir().join(format!("stlive-ambiguous-sources-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("Pharo13.1-64bit-a.sources"), b"s").unwrap();
+        std::fs::write(dir.join("Pharo14.0-64bit-b.sources"), b"s").unwrap();
+        assert_eq!(sources_version_in(&dir), None);
+        std::fs::remove_file(dir.join("Pharo14.0-64bit-b.sources")).unwrap();
+        assert_eq!(sources_version_in(&dir), Some(13));
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
