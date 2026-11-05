@@ -6,7 +6,7 @@ ST Live is for developers and coding agents that work through a shell. The short
 
 ## Install and try it
 
-You need a Rust toolchain, plus `curl` and `unzip` for automatic setup. Setup downloads Pharo 13. macOS and Linux are the primary platforms; core commands have also been verified on Windows 11. See [platform support](docs/operations.md#platform-support).
+You need a Rust toolchain, plus `curl` and `unzip` for automatic setup. Setup downloads Pharo 14 (or 13 with `stlive init --pharo 13`); one binary supports both. macOS and Linux are the primary platforms; core commands have also been verified on Windows 11. See [platform support](docs/operations.md#platform-support).
 
 ```sh
 cargo install --git https://github.com/paulwilke/stlive --locked
@@ -18,6 +18,8 @@ stlive init
 ```sh
 stlive init --vm /absolute/path/to/Pharo --image /absolute/path/to/Pharo.image
 ```
+
+`init` uses Pharo 14 on a fresh home; `stlive init --pharo 13` installs Pharo 13 instead. If the home already has a template of another version, `init --pharo N` installs N beside it (the existing default stays), and `stlive start --pharo N` / `stlive run --pharo N` use it. With `--vm/--image` the version of the given image is detected. Homes made by earlier releases (Pharo 13, no version recorded) keep working unchanged.
 
 Then, in your project directory:
 

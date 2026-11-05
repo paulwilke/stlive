@@ -667,4 +667,35 @@ out=$($S test run StLive-Tests); check "StLive-Tests: no failing test" '.result.
 check "StLive-Tests: more than 100 tests ran" '.result.ran>100'
 $S debug terminate --all >/dev/null
 
+# --- 0.9: Pharo 13 and 14 with one binary: the version is detected, remembered and decides how the VM is started
+out=$($S status); check "status reports the Pharo major version as a number" '.result.pharo_major|type' number
+PH=$(echo "$out" | jq -r .result.pharo_major)
+out=$($S image info); check "image info reports the Pharo major version" '.result.pharo_major' "$PH"
+check "image info still names the Pharo version string" '.result.pharo|startswith("Pharo")'
+[ "$(jq -r .pharo .stlive/default.config.json)" = "$PH" ] && { pass=$((pass+1)); echo "ok   - the instance remembers its Pharo version"; } || { fail=$((fail+1)); echo "FAIL - instance config pharo"; }
+out=$($S instances); check "instances lists the Pharo version" '[.result.instances[]|select(.name=="default")|.pharo]|first' "$PH"
+# a template written before 0.9 has no "pharo" key: the version is detected, never assumed
+OLDHOME="$WORK/oldhome"; mkdir -p "$OLDHOME"
+jq 'del(.pharo)' "$STLIVE_HOME/config.json" > "$OLDHOME/config.json"
+ln -s "$STLIVE_HOME/pharo" "$OLDHOME/pharo" 2>/dev/null
+out=$(STLIVE_HOME="$OLDHOME" $S -i oldtpl start); check "a template without a pharo key still starts" '.result.pharo_major' "$PH"
+out=$(STLIVE_HOME="$OLDHOME" $S -i oldtpl eval '1 + 1'); check "and evaluates" '.result.value.print' 2
+STLIVE_HOME="$OLDHOME" $S -i oldtpl stop --force >/dev/null
+# --pharo: the matching version is accepted, one that is not installed is reported, an instance keeps its version
+OTHER=13; [ "$PH" = 13 ] && OTHER=14
+out=$($S -i pmis start --pharo "$PH"); check "start --pharo with the installed version" '.ok'
+$S -i pmis stop --force >/dev/null
+out=$($S -i pmis start --pharo "$OTHER"); check "an instance cannot change its Pharo version" '.error.code' pharo_mismatch
+out=$($S -i pnew start --pharo 99); check "start --pharo of a version that is not installed" '.error.code' not_initialized
+out=$($S run --pharo 99 --eval '1' 2>&1); check "run --pharo of a version that is not installed" '.error.code' not_initialized
+got=$($S run --pharo "$PH" --eval '1 + 1' 2>/dev/null); out=$(jq -n --arg v "$got" '{v: $v}'); check "run --pharo with the installed version" '.v' 2
+# --vm-arg is placed before the image; --gtk is an opt-in worker mode (not exercised here)
+out=$($S -i vma start --vm-arg=--headless); check "start --vm-arg" '.ok'
+out=$($S -i vma ping); check "instance started with --vm-arg answers" '.result.pong'
+$S -i vma stop --force >/dev/null
+# init validates the version before touching the home
+out=$(STLIVE_HOME="$WORK/inithome" $S init --pharo 12 2>&1); check "init --pharo 12 is refused" '.error.code' init_failed
+out=$(STLIVE_HOME="$WORK/inithome" $S init --pharo 99 --vm "$(jq -r .vm "$STLIVE_HOME/config.json")" --image "$(jq -r .image "$STLIVE_HOME/config.json")" 2>&1); check "init --pharo that contradicts the given image is refused" '.error.code' init_failed
+[ ! -e "$WORK/inithome/pharo/Pharo.image" ] && { pass=$((pass+1)); echo "ok   - a refused init copied nothing"; } || { fail=$((fail+1)); echo "FAIL - refused init copied files"; }
+
 echo; echo "passed: $pass, failed: $fail"; [ $fail -eq 0 ]

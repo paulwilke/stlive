@@ -5,7 +5,7 @@ Most live request commands print JSON: `{"ok":true,"result":...}` or `{"ok":fals
 
 ## Setup
 ```bash
-stlive init                                   # once per machine: Pharo 13 + image with the server (~/.stlive)
+stlive init                                   # once per machine: Pharo 14 (or --pharo 13) + image with the server (~/.stlive)
 stlive start                                  # in the project directory; state in ./.stlive
 stlive load <Baseline> --repository tonel://$PWD/src --group Tests     # Metacello; reports new packages
 stlive image info                             # version, loaded packages, unsaved changes, sessions, background errors
