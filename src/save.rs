@@ -13,6 +13,8 @@ use std::path::{Path, PathBuf};
 pub struct Plan {
     pub report: Vec<Value>,
     pub marked: Vec<u64>,
+    /// Methods whose file version is neither what the image started from nor what it has now.
+    pub conflicts: Vec<Value>,
 }
 
 fn norm(s: &str) -> String {
@@ -275,10 +277,73 @@ fn definition_span(text: &str) -> Option<(usize, usize)> {
     Some((start, end))
 }
 
-/// If the image's class has other instance/class variables than the file, re-render the variable lists of
-/// the definition block and keep every other entry (name, superclass, traits, classTraits, category, package)
-/// as it is in the file. A changed class comment replaces the leading comment block (added when the file has
-/// none, removed when the image's comment is empty). Nothing changed: None. An image that sends no comment
+/// The value of a one-line entry `#key : value` of a definition block, without `#` and quotes:
+/// `#superclass : #Object` and `#superclass : 'Object'` both give `Object`. None when the block has no such entry.
+fn entry_value(block: &str, key: &str) -> Option<String> {
+    let marker = format!("#{} :", key);
+    block.lines().find_map(|l| {
+        let v = l.trim_start().strip_prefix(&marker)?.trim().trim_end_matches(',').trim();
+        let v = v.strip_prefix('#').unwrap_or(v);
+        Some(v.trim_matches('\'').to_string())
+    })
+}
+
+/// A trait composition with single spaces, so that `TFoo+TBar` and `TFoo + TBar` compare equal.
+fn composition(s: &str) -> String {
+    s.replace('+', " + ").replace('-', " - ").split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// The class-side composition Pharo derives from an instance-side one: `TFoo + TBar` -> `TFoo classTrait + TBar classTrait`.
+fn default_class_traits(traits: &str) -> String {
+    composition(traits).split(" + ").filter(|t| !t.is_empty()).map(|t| format!("{} classTrait", t)).collect::<Vec<_>>().join(" + ")
+}
+
+/// Variable names of a definition block: a slot written as `'name => SomeSlot'` counts by its name.
+fn listed_names(block: &str, key: &str) -> Vec<String> {
+    listed(block, key).iter().map(|v| v.split("=>").next().unwrap_or("").trim().to_string()).collect()
+}
+
+/// Where a class or trait definition of the image differs from its Tonel definition block: one
+/// `(field, image, files)` per difference. Fields: superclass, traits, class_traits, instance_variables,
+/// class_variables, class_instance_variables. `c` is a recorded class change or a `definitions` entry of
+/// `package.methods`; a key the image did not send is not compared.
+fn definition_differences(block: &str, c: &Value) -> Vec<(&'static str, String, String)> {
+    let mut out = Vec::new();
+    if let Some(image) = c["superclass"].as_str() {
+        if !block.trim_start().starts_with("Trait") {
+            let file = entry_value(block, "superclass").unwrap_or_default();
+            if file != image { out.push(("superclass", image.to_string(), file)); }
+        }
+    }
+    if c.get("traits").is_some() {
+        let image = composition(c["traits"].as_str().unwrap_or(""));
+        let file = composition(&entry_value(block, "traits").unwrap_or_default());
+        if file != image { out.push(("traits", image.clone(), file)); }
+        if c.get("class_traits").is_some() {
+            let image_class = composition(c["class_traits"].as_str().unwrap_or(""));
+            // a file without #classTraits means the composition Pharo derives from #traits
+            let file_class = entry_value(block, "classTraits").map(|t| composition(&t)).unwrap_or_else(|| default_class_traits(&image));
+            if file_class != image_class { out.push(("class_traits", image_class, file_class)); }
+        }
+    }
+    for (field, key, json_key) in [
+        ("instance_variables", "instVars", "instance_variables"),
+        ("class_variables", "classVars", "class_variables"),
+        ("class_instance_variables", "classInstVars", "class_instance_variables"),
+    ] {
+        if c.get(json_key).is_some_and(|v| v.is_array()) {
+            let image = str_list(c, json_key);
+            let file = listed_names(block, key);
+            if file != image { out.push((field, image.join(" "), file.join(" "))); }
+        }
+    }
+    out
+}
+
+/// Bring the definition block of an existing Tonel file in line with the image's class: superclass, traits,
+/// classTraits and the variable lists are rewritten when they differ; every other entry (name, category, package,
+/// tag, ...) stays as it is in the file. A changed class comment replaces the leading comment block (added when the
+/// file has none, removed when the image's comment is empty). Nothing changed: None. An image that sends no comment
 /// (older images, unreadable comment) leaves the file's comment alone.
 fn patch_class_definition(text: &str, c: &Value, symbol_style: bool, package: &str) -> Option<String> {
     let (start, end) = definition_span(text)?;
@@ -288,7 +353,11 @@ fn patch_class_definition(text: &str, c: &Value, symbol_style: bool, package: &s
         ("classVars", str_list(c, "class_variables")),
         ("classInstVars", str_list(c, "class_instance_variables")),
     ];
-    let vars_changed = wanted.iter().any(|(k, v)| &listed(block, k) != v);
+    let differences = definition_differences(block, c);
+    let changed = |field: &str| differences.iter().any(|(f, _, _)| *f == field);
+    let lists_changed = changed("instance_variables") || changed("class_variables") || changed("class_instance_variables");
+    let traits_changed = changed("traits") || changed("class_traits");
+    let vars_changed = !differences.is_empty();
     let prefix = &text[..start];
     let comment_changed = c["comment"].as_str().is_some_and(|image| norm(image).trim() != comment_of_block(prefix));
     if !vars_changed && !comment_changed {
@@ -311,17 +380,34 @@ fn patch_class_definition(text: &str, c: &Value, symbol_style: bool, package: &s
             last.1.push_str(l);
         }
     }
-    let is_list = |k: &str| wanted.iter().any(|(w, _)| *w == k);
+    // variable lists are re-rendered only when one of them differs, so a slot definition (`'x => Slot'`) the
+    // image reports by name alone is not flattened by an unrelated change
+    let is_list = |k: &str| lists_changed && wanted.iter().any(|(w, _)| *w == k);
+    let is_trait_entry = |k: &str| traits_changed && (k == "traits" || k == "classTraits");
     let mut out: Vec<String> = Vec::new();
     let mut inserted = false;
-    let lists = || wanted.iter().filter(|(_, v)| !v.is_empty()).map(|(k, v)| var_list(k, v).trim_end_matches('\n').trim_end_matches(',').to_string()).collect::<Vec<_>>();
+    let lists = || if lists_changed { wanted.iter().filter(|(_, v)| !v.is_empty()).map(|(k, v)| var_list(k, v).trim_end_matches('\n').trim_end_matches(',').to_string()).collect::<Vec<_>>() } else { Vec::new() };
+    let trait_entries = || {
+        let mut t = Vec::new();
+        if !traits_changed { return t; }
+        if let Some(v) = c["traits"].as_str().filter(|v| !v.is_empty()) { t.push(format!("\t#traits : '{}'", v)); }
+        if let Some(v) = c["class_traits"].as_str().filter(|v| !v.is_empty()) { t.push(format!("\t#classTraits : '{}'", v)); }
+        t
+    };
+    // traits follow the superclass (the name for a trait, which has none)
+    let traits_after = if entries.iter().any(|(k, _)| k == "superclass") { "superclass" } else { "name" };
     for (k, raw) in &entries {
-        if is_list(k) { continue; }
+        if is_list(k) || is_trait_entry(k) { continue; }
         if !inserted && (k == "category" || k == "package") {
             out.extend(lists());
             inserted = true;
         }
-        out.push(raw.trim_end().trim_end_matches(',').to_string());
+        if k == "superclass" && changed("superclass") {
+            out.push(format!("\t#superclass : {}", sym(c["superclass"].as_str().unwrap_or("Object"), raw.contains(": #"))));
+        } else {
+            out.push(raw.trim_end().trim_end_matches(',').to_string());
+        }
+        if k == traits_after { out.extend(trait_entries()); }
     }
     if !inserted {
         out.extend(lists());
@@ -341,6 +427,27 @@ struct FileStats {
     removed: Vec<String>,
 }
 
+/// Source text with every run of whitespace as one space: what the conflict check compares, so that line endings,
+/// indentation and a body written on the pattern line never count as a difference.
+fn squash(src: &str) -> String {
+    src.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// Three-way check of one method before it is written. `base` is the source the image had before its first unsaved
+/// change (None: the method was new), `ours` what the image has now (None: removed), `theirs` what the file has
+/// (None: no such method). The file is in conflict when it is neither the base nor already what the image has.
+fn conflict_of(base: Option<&str>, ours: Option<&str>, theirs: Option<&str>) -> Option<&'static str> {
+    let (b, o, t) = (base.map(squash), ours.map(squash), theirs.map(squash));
+    if t == b || t == o {
+        return None;
+    }
+    Some(match (&b, &t) {
+        (None, Some(_)) => "the file has a method of this name that the image did not know when it created its own",
+        (Some(_), None) => "the method was removed from the file after the image read it",
+        _ => "the method in the file was changed after the image read it",
+    })
+}
+
 pub fn plan(changes: &[Value], package: &str, dir: &Path, dry_run: bool) -> Result<Plan, String> {
     let pkg_dir = dir.join(package);
     let symbol_style = detect_symbol_style(dir);
@@ -349,6 +456,9 @@ pub fn plan(changes: &[Value], package: &str, dir: &Path, dry_run: bool) -> Resu
     // Coalesce: last write wins per (class, side, selector); class definitions kept in order.
     let mut class_defs: Vec<&Value> = Vec::new();
     let mut methods: BTreeMap<(String, String, String), &Value> = BTreeMap::new();
+    // the first unsaved change of each method holds the source the image started from (`old_source`)
+    let mut first: BTreeMap<(String, String, String), &Value> = BTreeMap::new();
+    let mut conflicts: Vec<Value> = Vec::new();
     for c in changes {
         marked.push(c["index"].as_u64().unwrap_or(0));
         match c["kind"].as_str().unwrap_or("") {
@@ -362,6 +472,7 @@ pub fn plan(changes: &[Value], package: &str, dir: &Path, dry_run: bool) -> Resu
                     c["side"].as_str().unwrap_or("instance").to_string(),
                     c["selector"].as_str().unwrap_or("").to_string(),
                 );
+                first.entry(key.clone()).or_insert(c);
                 methods.insert(key, c);
             }
             _ => {}
@@ -420,6 +531,15 @@ pub fn plan(changes: &[Value], package: &str, dir: &Path, dry_run: bool) -> Resu
         let blocks = method_blocks(&text);
         let found = blocks.iter().find(|b| b.class_header == header && &b.selector == selector);
         let label = format!("{}>>{}", header, selector);
+        // a file this very save creates has no earlier version to conflict with
+        if existed && !stats.get(&file).is_some_and(|s| s.created) {
+            let theirs = parse_methods(&text).into_iter().find(|m| m.class_header == header && &m.selector == selector).map(|m| m.source);
+            let base = first.get(&(class_name.clone(), side.clone(), selector.clone())).and_then(|f| f["old_source"].as_str());
+            let ours = if c["kind"] == "method-remove" { None } else { c["new_source"].as_str() };
+            if let Some(problem) = conflict_of(base, ours, theirs.as_deref()) {
+                conflicts.push(json!({"method": label, "class": class_name, "side": side, "selector": selector, "file": file.display().to_string(), "problem": problem}));
+            }
+        }
         let st = stats.entry(file.clone()).or_default();
         let new_text = if c["kind"] == "method-remove" {
             match found {
@@ -477,7 +597,7 @@ pub fn plan(changes: &[Value], package: &str, dir: &Path, dry_run: bool) -> Resu
             "removed": st.map(|s| s.removed.clone()).unwrap_or_default(),
         }));
     }
-    Ok(Plan { report, marked })
+    Ok(Plan { report, marked, conflicts })
 }
 
 /// One method as written in a Tonel file: class header ("Foo" / "Foo class"), selector, normalised source.
@@ -530,6 +650,7 @@ pub fn drift(image: &Value, package: &str, dir: &Path) -> Value {
     let mut in_files: BTreeMap<String, String> = BTreeMap::new();
     let mut file_classes: Vec<String> = Vec::new();
     let mut file_traits: Vec<String> = Vec::new();
+    let mut file_definitions: BTreeMap<String, String> = BTreeMap::new();
     if let Ok(rd) = fs::read_dir(&pkg_dir) {
         for e in rd.flatten() {
             let p = e.path();
@@ -538,6 +659,11 @@ pub fn drift(image: &Value, package: &str, dir: &Path) -> Value {
             if name.ends_with(".trait.st") { file_traits.push(name.trim_end_matches(".trait.st").to_string()); }
             if name.ends_with(".class.st") || name.ends_with(".trait.st") || name.ends_with(".extension.st") {
                 if let Ok(t) = fs::read_to_string(&p) {
+                    if !name.ends_with(".extension.st") {
+                        if let Some((start, end)) = definition_span(&t) {
+                            file_definitions.insert(name.split('.').next().unwrap_or("").to_string(), t[start..end].to_string());
+                        }
+                    }
                     for m in parse_methods(&t) {
                         let (cls, side) = split_header(&m.class_header);
                         in_files.insert(format!("{}|{}|{}", cls, side, m.selector), m.source);
@@ -562,10 +688,28 @@ pub fn drift(image: &Value, package: &str, dir: &Path) -> Value {
     file_behaviors.extend(file_traits.iter().cloned());
     let classes_missing_in_files: Vec<&String> = image_classes.iter().filter(|c| !file_behaviors.contains(c)).collect();
     let classes_missing_in_image: Vec<&String> = file_behaviors.iter().filter(|c| !image_classes.contains(c)).collect();
-    let ok = missing_in_files.is_empty() && missing_in_image.is_empty() && different.is_empty() && classes_missing_in_files.is_empty() && classes_missing_in_image.is_empty();
+    // images before 0.10 send no `definitions`: then only methods and names are compared, and `compared` says so
+    let definitions = image["definitions"].as_array();
+    let mut definitions_different: Vec<Value> = Vec::new();
+    for d in definitions.into_iter().flatten() {
+        let name = d["name"].as_str().unwrap_or("");
+        if let Some(block) = file_definitions.get(name) {
+            for (field, in_image, in_files) in definition_differences(block, d) {
+                definitions_different.push(json!({"class": name, "field": field, "image": in_image, "files": in_files}));
+            }
+        }
+    }
+    let mut compared = vec!["method sources", "class and trait names"];
+    if definitions.is_some() {
+        compared.push("superclass, trait composition and variable names of each class");
+    }
+    let ok = missing_in_files.is_empty() && missing_in_image.is_empty() && different.is_empty() && classes_missing_in_files.is_empty() && classes_missing_in_image.is_empty() && definitions_different.is_empty();
     json!({
         "package": package,
         "ok": ok,
+        "compared": compared,
+        "not_compared": ["class comments", "method protocols", "slot and class-variable definitions beyond their names", "behaviour (run the tests: test run --fresh)"],
+        "definitions_different": definitions_different,
         "methods_in_image": in_image.len(),
         "methods_in_files": in_files.len(),
         "missing_in_files": missing_in_files,
@@ -651,6 +795,77 @@ mod tests {
         let t = json!({"class_name": "TFoo", "instance_variables": ["tv", "tw"], "class_variables": [], "class_instance_variables": []});
         let out = patch_class_definition(TRAIT_FILE, &t, false, "Pkg").unwrap();
         assert!(out.starts_with("Trait {\n\t#name : 'TFoo',\n\t#instVars : [\n\t\t'tv',\n\t\t'tw'\n\t],\n\t#package : 'Pkg'\n}\n"), "{}", out);
+    }
+
+    #[test]
+    fn a_changed_superclass_and_trait_composition_are_written() {
+        let file = "Class {\n\t#name : 'Bar',\n\t#superclass : 'Object',\n\t#instVars : [\n\t\t'a => ObservableSlot'\n\t],\n\t#category : 'Pkg',\n\t#package : 'Pkg'\n}\n";
+        let c = json!({"class_name": "Bar", "superclass": "Model", "traits": "TBar + TBaz", "class_traits": "TBar classTrait + TBaz classTrait", "instance_variables": ["a"], "class_variables": [], "class_instance_variables": []});
+        let out = patch_class_definition(file, &c, false, "Pkg").unwrap();
+        // the slot definition stays: the variable names did not change
+        assert_eq!(out, "Class {\n\t#name : 'Bar',\n\t#superclass : 'Model',\n\t#traits : 'TBar + TBaz',\n\t#classTraits : 'TBar classTrait + TBaz classTrait',\n\t#instVars : [\n\t\t'a => ObservableSlot'\n\t],\n\t#category : 'Pkg',\n\t#package : 'Pkg'\n}\n");
+        assert!(patch_class_definition(&out, &c, false, "Pkg").is_none());
+        // the composition is dropped again; symbol style keeps its style
+        let plain = json!({"class_name": "Bar", "superclass": "Object", "traits": null, "class_traits": null, "instance_variables": ["a"], "class_variables": [], "class_instance_variables": []});
+        assert_eq!(patch_class_definition(&out, &plain, false, "Pkg").unwrap(), file);
+        let symbols = "Class {\n\t#name : #Bar,\n\t#superclass : #Object,\n\t#category : #Pkg\n}\n";
+        let moved = json!({"class_name": "Bar", "superclass": "Model", "traits": null, "class_traits": null, "instance_variables": [], "class_variables": [], "class_instance_variables": []});
+        assert_eq!(patch_class_definition(symbols, &moved, true, "Pkg").unwrap(), "Class {\n\t#name : #Bar,\n\t#superclass : #Model,\n\t#category : #Pkg\n}\n");
+        // a file without #classTraits holds the composition Pharo derives from #traits
+        let derived = "Class {\n\t#name : 'Bar',\n\t#superclass : 'Object',\n\t#traits : 'TBar',\n\t#package : 'Pkg'\n}\n";
+        let same = json!({"class_name": "Bar", "superclass": "Object", "traits": "TBar", "class_traits": "TBar classTrait", "instance_variables": [], "class_variables": [], "class_instance_variables": []});
+        assert!(patch_class_definition(derived, &same, false, "Pkg").is_none());
+    }
+
+    #[test]
+    fn a_method_changed_on_both_sides_is_a_conflict() {
+        assert_eq!(conflict_of(Some("a\n\t^ 1"), Some("a\n\t^ 2"), Some("a\r\n    ^ 1")), None); // file still at the base
+        assert_eq!(conflict_of(Some("a\n\t^ 1"), Some("a\n\t^ 2"), Some("a\n\t^ 2")), None); // file already has ours
+        assert_eq!(conflict_of(None, Some("a\n\t^ 2"), None), None); // new method, file has none
+        assert_eq!(conflict_of(Some("a\n\t^ 1"), None, None), None); // removed on both sides
+        assert!(conflict_of(Some("a\n\t^ 1"), Some("a\n\t^ 2"), Some("a\n\t^ 3")).unwrap().contains("changed"));
+        assert!(conflict_of(Some("a\n\t^ 1"), Some("a\n\t^ 2"), None).unwrap().contains("removed"));
+        assert!(conflict_of(None, Some("a\n\t^ 2"), Some("a\n\t^ 3")).unwrap().contains("did not know"));
+        assert!(conflict_of(Some("a\n\t^ 1"), None, Some("a\n\t^ 3")).is_some()); // removed here, edited there
+
+        let dir = tmp("conflict");
+        let file = dir.join("Pkg/Foo.class.st");
+        let on_disk = "Class {\n\t#name : 'Foo',\n\t#superclass : 'Object',\n\t#package : 'Pkg'\n}\n\n{ #category : 'x' }\nFoo >> one [\n\t^ 11\n]\n\n{ #category : 'x' }\nFoo >> two [\n\t^ 2\n]\n";
+        fs::write(&file, on_disk).unwrap();
+        let change = |index: u64, selector: &str, old: &str, new: &str| json!({"index": index, "kind": "method-compile", "class_name": "Foo", "class_kind": "class", "class_package": "Pkg", "package": "Pkg", "side": "instance", "selector": selector, "protocol": "x", "old_source": old, "new_source": new});
+        // `one` was 1 when the image read it, the file now says 11; `two` is untouched on disk. The base of several
+        // edits is the first one's old source.
+        let changes = vec![change(1, "one", "one\n\t^ 1", "one\n\t^ 5"), change(2, "one", "one\n\t^ 5", "one\n\t^ 6"), change(3, "two", "two\n\t^ 2", "two\n\t^ 22")];
+        let p = plan(&changes, "Pkg", &dir, true).unwrap();
+        assert_eq!(p.conflicts.len(), 1, "{:?}", p.conflicts);
+        assert_eq!(p.conflicts[0]["method"], "Foo>>one");
+        assert_eq!(p.conflicts[0]["file"], file.display().to_string());
+        assert_eq!(fs::read_to_string(&file).unwrap(), on_disk); // a dry run writes nothing
+        // an edit that started from what the file has is no conflict
+        let p = plan(&[change(1, "one", "one\n\t^ 11", "one\n\t^ 6")], "Pkg", &dir, true).unwrap();
+        assert!(p.conflicts.is_empty());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn drift_compares_class_definitions_when_the_image_sends_them() {
+        let dir = tmp("drift-definitions");
+        fs::write(dir.join("Pkg/Foo.class.st"), "Class {\n\t#name : 'Foo',\n\t#superclass : 'Object',\n\t#instVars : [\n\t\t'a'\n\t],\n\t#package : 'Pkg'\n}\n").unwrap();
+        let image = |superclass: &str, ivars: Value| json!({"classes": ["Foo"], "traits": [], "methods": [],
+            "definitions": [{"name": "Foo", "kind": "class", "superclass": superclass, "traits": null, "class_traits": null, "instance_variables": ivars, "class_variables": [], "class_instance_variables": []}]});
+        let same = drift(&image("Object", json!(["a"])), "Pkg", &dir);
+        assert_eq!(same["ok"], true, "{}", same);
+        assert_eq!(same["compared"].as_array().unwrap().len(), 3);
+        let other = drift(&image("Model", json!(["a", "b"])), "Pkg", &dir);
+        assert_eq!(other["ok"], false);
+        assert_eq!(other["definitions_different"], json!([
+            {"class": "Foo", "field": "superclass", "image": "Model", "files": "Object"},
+            {"class": "Foo", "field": "instance_variables", "image": "a b", "files": "a"}]));
+        // an image before 0.10 sends no definitions: methods and names only, and the report says so
+        let old = drift(&json!({"classes": ["Foo"], "traits": [], "methods": []}), "Pkg", &dir);
+        assert_eq!(old["ok"], true);
+        assert_eq!(old["compared"].as_array().unwrap().len(), 2);
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]

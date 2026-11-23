@@ -186,6 +186,21 @@ StLiveCommands >> finishEval: response args: args [
 ]
 
 { #category : 'helpers' }
+StLiveCommands >> describeEvalValue: value in: result args: args [
+	"What an eval result says about its value beyond the compact summary: a longer print (print_limit), a mark when
+	the value is an exception object (the code answered it, nothing was signalled), the whole text (full)."
+	| limit |
+	limit := self int: 'print_limit' in: args default: server describer defaultPrintLimit.
+	limit = server describer defaultPrintLimit ifFalse: [
+		limit < 1 ifTrue: [ self fail: 'bad_argument' message: 'print_limit must be 1 or more' ].
+		result at: 'value' put: (server describer summary: value limit: limit) ].
+	(value isKindOf: Exception) ifTrue: [
+		result at: 'value_is_exception' put: true.
+		result at: 'warning' put: 'The code answered an exception object as its value (' , value class name , ', for example from `on: Error do: [ :e | e ]`). Nothing was signalled to stlive, so there is no debug session.' ].
+	self addFullText: result value: value args: args
+]
+
+{ #category : 'helpers' }
 StLiveCommands >> addFullText: result value: value args: args [
 	"eval --full: the complete printString (capped) next to the compact summary."
 	| text cap |
@@ -220,6 +235,7 @@ StLiveCommands >> sessionError: aSession [
 	d at: 'message' put: aSession messageText.
 	d at: 'kind' put: (aSession kind == #interrupted ifTrue: [ 'timeout' ] ifFalse: [ 'exception' ]).
 	d at: 'session' put: aSession id.
+	aSession kind == #interrupted ifTrue: [ d at: 'may_still_run' put: false ].
 	d at: 'top_frame' put: 0.
 	top := aSession contextAt: 0.
 	top ifNotNil: [ d at: 'top' put: (server describer frame: top index: 0) ].
@@ -231,7 +247,9 @@ StLiveCommands >> sessionError: aSession [
 	(aSession exception isKindOf: MessageNotUnderstood) ifTrue: [
 		[ | sugg |
 		sugg := self suggestionsFor: aSession exception message selector receiver: aSession exception receiver.
-		sugg isEmpty ifFalse: [ d at: 'did_you_mean' put: sugg ] ] on: Error do: [ :e | nil ] ].
+		sugg isEmpty ifFalse: [ d at: 'did_you_mean' put: sugg ].
+		(self classDefinitionHintFor: aSession exception message selector receiver: aSession exception receiver)
+			ifNotNil: [ :hint | d at: 'hint' put: hint ] ] on: Error do: [ :e | nil ] ].
 	^ d
 ]
 
@@ -347,6 +365,7 @@ StLiveCommands >> cmdStatus: args [
 		'sessions' -> server sessions size.
 		'object_refs' -> server objectCount.
 		'changes' -> server changes size.
+		'unsaved_changes' -> (server changes count: [ :c | (c at: 'saved' ifAbsent: [ true ]) not ]).
 		'background_errors' -> server backgroundErrors size })
 ]
 
@@ -504,6 +523,32 @@ StLiveCommands >> packagesLoadedForGroups: groupNames version: version [
 ]
 
 { #category : 'baselines' }
+StLiveCommands >> testsGroupOf: version [
+	"The baseline's group `Tests`, for `test run --fresh` without targets: `packages` are what Metacello loads for
+	it, `test_packages` those of them that are loaded and define a TestCase subclass. Nil when the baseline has no
+	such group."
+	| names |
+	((self groupMembershipsOf: version) includesKey: 'Tests') ifFalse: [ ^ nil ].
+	names := (self packagesLoadedForGroups: #( 'Tests' ) version: version) asSortedCollection asArray.
+	^ self m: {
+		'packages' -> names.
+		'test_packages' -> (names select: [ :n |
+			(PackageOrganizer default packageNamed: n ifAbsent: [ nil ])
+				ifNil: [ false ]
+				ifNotNil: [ :pkg | pkg definedClasses anySatisfy: [ :c | c inheritsFrom: TestCase ] ] ]) }
+]
+
+{ #category : 'baselines' }
+StLiveCommands >> refuseLoadOverUnsavedChangesIn: packageNames [
+	"load --protect-unsaved: the files would replace code changed in the image and not yet written to them."
+	| counts text |
+	counts := self unsavedByPackage associations select: [ :a | packageNames includes: a key ].
+	counts isEmpty ifTrue: [ ^ self ].
+	text := (counts collect: [ :a | a key , ' (' , a value printString , ')' ]) inject: '' into: [ :acc :each | acc isEmpty ifTrue: [ each ] ifFalse: [ acc , ', ' , each ] ].
+	self fail: 'unsaved_changes' message: 'Nothing was loaded: the image has unsaved changes in ' , text , ' that the files would replace. Write them with `stlive save`, or load without --protect-unsaved to let the files win.'
+]
+
+{ #category : 'baselines' }
 StLiveCommands >> isPackageLoaded: aName [
 	^ (PackageOrganizer default packageNamed: aName ifAbsent: [ nil ]) notNil
 ]
@@ -641,6 +686,7 @@ StLiveCommands >> cmdLoadBaseline: args [
 	timeout := self int: 'timeout' in: args default: 600000.
 	prune := (args at: 'prune' ifAbsent: [ false ]) == true.
 	known := self knownBaselinePackagesOf: name.
+	(args at: 'protect_unsaved' ifAbsent: [ false ]) == true ifTrue: [ self refuseLoadOverUnsavedChangesIn: known ].
 	before := (PackageOrganizer default packages collect: [ :p | p name ]) asSet.
 	response := self
 		runBlock: [
@@ -684,6 +730,7 @@ StLiveCommands >> cmdLoadBaseline: args [
 				'not_reloaded_packages' -> notReloaded.
 				'undeclared' -> (undeclared first: (50 min: undeclared size)).
 				'undeclared_count' -> undeclared size.
+				'tests_group' -> (self testsGroupOf: version).
 				'pruned_packages' -> pruned first.
 				'prune_skipped' -> pruned second.
 				'warnings' -> (warnings asSet asArray collect: [ :w | self m: { 'message' -> w. 'count' -> (warnings occurrencesOf: w) } ]) }.
@@ -740,7 +787,7 @@ StLiveCommands >> cmdImageSave: args [
 StLiveCommands >> cmdImageStop: args [
 	"Destructive: requires force: true."
 	(args at: 'force' ifAbsent: [ false ]) == true
-		ifFalse: [ self fail: 'confirmation_required' message: 'Stopping the image discards all unsaved state and debug sessions; pass --force (use `image save` first to keep state).' ].
+		ifFalse: [ self fail: 'confirmation_required' message: 'Stopping the image discards all unsaved state and debug sessions; pass --force: `stlive -i <instance> stop --force` (use `image save` first to keep state).' ].
 	[ (Delay forMilliseconds: 300) wait. Smalltalk quitPrimitive ] forkAt: Processor userInterruptPriority.
 	^ self ok: (self m: { 'stopping' -> true })
 ]
@@ -758,7 +805,7 @@ StLiveCommands >> cmdEval: args [
 		timeout: timeout
 		mode: 'first'
 		ui: (args at: 'ui' ifAbsent: [ false ]) == true.
-	(response at: 'ok') ifTrue: [ self addFullText: (response at: 'result') value: holder args: args ].
+	(response at: 'ok') ifTrue: [ self describeEvalValue: holder in: (response at: 'result') args: args ].
 	^ self finishEval: response args: args
 ]
 
@@ -1664,7 +1711,7 @@ StLiveCommands >> cmdDebugEval: args [
 		timeout: (self int: 'timeout' in: args default: 30000)
 		mode: 'first'
 		ui: (args at: 'ui' ifAbsent: [ false ]) == true.
-	(response at: 'ok') ifTrue: [ self addFullText: (response at: 'result') value: holder args: args ].
+	(response at: 'ok') ifTrue: [ self describeEvalValue: holder in: (response at: 'result') args: args ].
 	^ self finishEval: response args: args
 ]
 
@@ -1906,6 +1953,20 @@ StLiveCommands >> normalizedSourceOf: aMethod [
 ]
 
 { #category : 'code' }
+StLiveCommands >> definitionOf: cls [
+	"The parts of a class or trait definition that Tonel writes, for `stlive drift`."
+	^ self m: {
+		'name' -> cls name.
+		'kind' -> (self kindOf: cls).
+		'superclass' -> (cls isTrait ifTrue: [ nil ] ifFalse: [ cls superclass ifNil: [ 'nil' ] ifNotNil: [ :sc | sc name ] ]).
+		'traits' -> (self traitCompositionOf: cls).
+		'class_traits' -> (self traitCompositionOf: cls class).
+		'instance_variables' -> cls instVarNames asArray.
+		'class_instance_variables' -> cls class instVarNames asArray.
+		'class_variables' -> cls classVarNames asArray }
+]
+
+{ #category : 'code' }
 StLiveCommands >> cmdPackageMethods: args [
 	"Every class, trait and method of a package as the image has it (extension methods included), for `stlive drift`.
 	Only methods defined locally count: a method a class gets from a trait lives in the trait's Tonel file."
@@ -1927,6 +1988,7 @@ StLiveCommands >> cmdPackageMethods: args [
 		'package' -> name.
 		'classes' -> classes asArray.
 		'traits' -> traits asArray.
+		'definitions' -> (pkg definedClasses asArray collect: [ :c | self definitionOf: c ]).
 		'methods' -> (methods collect: [ :m |
 			self m: {
 				'class' -> m methodClass instanceSide name.
@@ -1946,6 +2008,17 @@ StLiveCommands >> levenshtein: a to: b [
 			cur at: j + 1 put: (((prev at: j + 1) + 1 min: (cur at: j) + 1) min: (prev at: j) + ((a at: i) = (b at: j) ifTrue: [ 0 ] ifFalse: [ 1 ])) ].
 		prev := cur ].
 	^ prev last
+]
+
+{ #category : 'suggestions' }
+StLiveCommands >> classDefinitionHintFor: aSelector receiver: aReceiver [
+	"A class was sent one of the class-definition messages older Pharo versions had (subclass:instanceVariableNames:classVariableNames:package: and
+	its relatives) and does not understand it: say how a class is defined now. Nil for every other message."
+	| name |
+	aReceiver isBehavior ifFalse: [ ^ nil ].
+	name := aSelector asString.
+	((name includesSubstring: 'ubclass:') and: [ (name includesSubstring: 'instanceVariableNames:') or: [ name includesSubstring: 'uses:' ] ]) ifFalse: [ ^ nil ].
+	^ 'This Pharo version no longer has ' , name , '. Define the class with the fluid builder: `' , aReceiver name , ' << #Foo slots: { #a . #b }; package: ''MyPackage''; install` (add `traits: { TBar };` or `sharedVariables: { #Count };` before `package:` as needed), or with `stlive class create Foo --superclass ' , aReceiver name , ' --ivars ''a b'' --package MyPackage`.'
 ]
 
 { #category : 'suggestions' }

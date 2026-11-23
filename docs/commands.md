@@ -17,7 +17,7 @@ Commands:
   stop       Stop the image (destructive: unsaved state and debug sessions are lost)
   status     Image identity and status
   ping       Check reachability
-  eval       Evaluate Smalltalk code ('-' reads stdin). Exceptions become debug sessions
+  eval       Evaluate Smalltalk code: the argument, '-' (or no argument) for stdin, or --file. Exceptions become debug sessions
   obj        Inspect objects by reference
   find       Search the system
   class      Classes
@@ -232,27 +232,29 @@ Options:
 ## `stlive eval`
 
 ```
-Evaluate Smalltalk code ('-' reads stdin). Exceptions become debug sessions
+Evaluate Smalltalk code: the argument, '-' (or no argument) for stdin, or --file. Exceptions become debug sessions
 
-Usage: stlive eval [OPTIONS] <CODE>
+Usage: stlive eval [OPTIONS] [CODE]
 
 Arguments:
-  <CODE>  
+  [CODE]  
 
 Options:
-  -i, --instance <INSTANCE>    Instance name (several images can run side by side) [env: STLIVE_INSTANCE=] [default: default]
-      --in <RECEIVER>          Object reference used as `self`
-      --state-dir <STATE_DIR>  Directory holding instance state (port file, pid, log, config) [env: STLIVE_DIR=]
-      --timeout <TIMEOUT>      Milliseconds before the running code is interrupted into a debug session
-      --full                   Also return the complete printString of the value as `text` (capped at 100000 chars)
-      --pretty                 Pretty-print JSON
-      --log <LOG>              Append one JSON line per call (time, command, duration, output size, ok, key result fields) to this file [env: STLIVE_LOG=]
-      --no-session             On failure report the error but do not keep a suspended debug session
-      --no-source              Leave the statement text out of error frames
-      --tag <TAG>              Free-form marker written to the call log (scene, task, ...) [env: STLIVE_TAG=]
-      --text                   Human-readable indented text instead of JSON (exit codes are unchanged)
-      --ui                     Run in the GUI image's UI process (safe for Spec/Morphic changes; needs `start --gui`)
-  -h, --help                   Print help
+      --file <FILE>                Read the code from this file ('-' reads stdin); for code of several lines
+  -i, --instance <INSTANCE>        Instance name (several images can run side by side) [env: STLIVE_INSTANCE=] [default: default]
+      --print-limit <PRINT_LIMIT>  Characters of the value's printString to show in `print` (default 120; --full gives the whole text as well) [env: STLIVE_PRINT_LIMIT=]
+      --state-dir <STATE_DIR>      Directory holding instance state (port file, pid, log, config) [env: STLIVE_DIR=]
+      --in <RECEIVER>              Object reference used as `self`
+      --pretty                     Pretty-print JSON
+      --log <LOG>                  Append one JSON line per call (time, command, duration, output size, ok, key result fields) to this file [env: STLIVE_LOG=]
+      --timeout <TIMEOUT>          Milliseconds before the running code is interrupted into a debug session
+      --full                       Also return the complete printString of the value as `text` (capped at 100000 chars)
+      --tag <TAG>                  Free-form marker written to the call log (scene, task, ...) [env: STLIVE_TAG=]
+      --no-session                 On failure report the error but do not keep a suspended debug session
+      --text                       Human-readable indented text instead of JSON (exit codes are unchanged)
+      --no-source                  Leave the statement text out of error frames
+      --ui                         Run in the GUI image's UI process (safe for Spec/Morphic changes; needs `start --gui`)
+  -h, --help                       Print help
 ```
 
 ## `stlive obj`
@@ -1077,25 +1079,27 @@ Options:
 ```
 Evaluate code in a frame (temporaries visible; --frame N, default 0 = top frame)
 
-Usage: stlive debug eval [OPTIONS] <SESSION> <CODE>
+Usage: stlive debug eval [OPTIONS] <SESSION> [CODE]
 
 Arguments:
   <SESSION>  
-  <CODE>     
+  [CODE]     
 
 Options:
-      --frame <FRAME>          [default: 0]
-  -i, --instance <INSTANCE>    Instance name (several images can run side by side) [env: STLIVE_INSTANCE=] [default: default]
-      --state-dir <STATE_DIR>  Directory holding instance state (port file, pid, log, config) [env: STLIVE_DIR=]
-      --timeout <TIMEOUT>      
-      --full                   
-      --pretty                 Pretty-print JSON
-      --log <LOG>              Append one JSON line per call (time, command, duration, output size, ok, key result fields) to this file [env: STLIVE_LOG=]
-      --no-session             
-      --tag <TAG>              Free-form marker written to the call log (scene, task, ...) [env: STLIVE_TAG=]
-      --ui                     
-      --text                   Human-readable indented text instead of JSON (exit codes are unchanged)
-  -h, --help                   Print help
+      --file <FILE>                Read the code from this file ('-' reads stdin)
+  -i, --instance <INSTANCE>        Instance name (several images can run side by side) [env: STLIVE_INSTANCE=] [default: default]
+      --print-limit <PRINT_LIMIT>  Characters of the value's printString to show in `print` (default 120) [env: STLIVE_PRINT_LIMIT=]
+      --state-dir <STATE_DIR>      Directory holding instance state (port file, pid, log, config) [env: STLIVE_DIR=]
+      --frame <FRAME>              [default: 0]
+      --pretty                     Pretty-print JSON
+      --log <LOG>                  Append one JSON line per call (time, command, duration, output size, ok, key result fields) to this file [env: STLIVE_LOG=]
+      --timeout <TIMEOUT>          
+      --full                       
+      --tag <TAG>                  Free-form marker written to the call log (scene, task, ...) [env: STLIVE_TAG=]
+      --no-session                 
+      --text                       Human-readable indented text instead of JSON (exit codes are unchanged)
+      --ui                         
+  -h, --help                       Print help
 ```
 
 ### `stlive debug resume`
@@ -1327,6 +1331,7 @@ Options:
       --log <LOG>              Append one JSON line per call (time, command, duration, output size, ok, key result fields) to this file [env: STLIVE_LOG=]
       --tag <TAG>              Free-form marker written to the call log (scene, task, ...) [env: STLIVE_TAG=]
       --verify                 After writing, compare image and files and fail if they still differ
+      --force                  Write even when a file was changed since the image last saw it (`save_conflict`): the image's version replaces the file's
       --text                   Human-readable indented text instead of JSON (exit codes are unchanged)
   -h, --help                   Print help
 ```
@@ -1349,8 +1354,9 @@ Options:
       --pretty                   Pretty-print JSON
       --prune                    Also unload the stale packages; ones with unsaved changes or listed by another loaded baseline are kept (prune_skipped)
       --log <LOG>                Append one JSON line per call (time, command, duration, output size, ok, key result fields) to this file [env: STLIVE_LOG=]
-      --timeout <TIMEOUT>        
+      --protect-unsaved          Refuse (nothing is loaded, error `unsaved_changes`) when the image has unsaved changes in the baseline's packages. Default: the files win and those changes are reported as superseded
       --tag <TAG>                Free-form marker written to the call log (scene, task, ...) [env: STLIVE_TAG=]
+      --timeout <TIMEOUT>        
       --text                     Human-readable indented text instead of JSON (exit codes are unchanged)
   -h, --help                     Print help
 ```

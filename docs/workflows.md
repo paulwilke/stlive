@@ -17,7 +17,7 @@ stlive image info
 
 Use the baseline name without `BaselineOf`. The group `Tests` must exist; repeat `--group` for multiple groups. Test targets can be packages, test classes, `'Class>>testSelector'` or quoted globs such as `'MyApp-*-Tests'`.
 
-**Reloading chooses the files.** Another `load` overwrites modified loaded packages, including unsaved live edits, and refreshes the baseline package. Save first if you want to retain live changes. Read the response:
+**Reloading chooses the files.** Another `load` overwrites modified loaded packages, including unsaved live edits, and refreshes the baseline package. Save first if you want to retain live changes, or pass `--protect-unsaved`: the load is then refused (`unsaved_changes`, nothing loaded) while the baseline's packages have unsaved changes. Read the response:
 
 | Field | Meaning |
 |---|---|
@@ -45,6 +45,12 @@ Read real source and selectors first, reproduce a concrete failure, make one sma
 
 When preserving state is part of the task, inspect and retain the supplied object reference, compile on its class and call the new method with `eval --in REF`. Do not replace the instance. See the [live-object example](getting-started.md#2-add-a-method-to-an-existing-object).
 
+**Saving checks the files first.** For each method, `save` compares three versions: the source the image had before its first unsaved change, the source it has now, and the file. If the file is neither of the first two, somebody edited it after the image read it (an editor, a branch switch, a pull). `save` then writes nothing at all and fails with `save_conflict`, listing method and file; `--dry-run` runs the same check. Resolve it by loading the files (they replace the image's version) or with `save --force` (the image's version replaces the file's, reported as `conflicts_overwritten`). Whitespace alone is never a conflict. Class definitions are not checked this way.
+
+A changed superclass or trait composition of an existing class is written to its file, like changed variables and comments.
+
+**What `--verify` and `drift` compare** is listed in each report: `compared` (method sources, class and trait names, and per class the superclass, trait composition and variable names) and `not_compared` (class comments, method protocols, slot definitions beyond their names, behaviour). Differences in definitions appear as `definitions_different`.
+
 Changes through `eval` or the IDE are recorded too. Save every affected package, including tests and extensions. `save --all --dir src --verify` is useful when the directory is intended to contain all recorded changes. `drift --all --dir src` checks loaded package folders and loaded packages listed by local baselines but missing from files. Neither command runs tests.
 
 `save` handles per-method Tonel changes, traits, extensions and removals. It does not rewrite a changed superclass or trait composition of an existing class. Inspect the diff and verify saved sources after structural changes.
@@ -59,7 +65,7 @@ stlive test run --fresh --load MyApp --repository "tonel://$PWD/src" --group Tes
 
 This starts a temporary instance from the installed template, loads the baseline, runs tests, then removes the instance. The normal project instance is not replaced. A remote repository URL would test remote sources rather than uncommitted local files.
 
-Without explicit targets, fresh mode selects packages added by the load whose names end in `-Tests`; specify targets if your naming differs. Check targets, counts, failures and skips. Use `--skips-fail` if your policy treats skips as failures. Prepared template dependencies still matter; this does not validate every deployment environment.
+Without explicit targets, fresh mode runs the test packages of the baseline's group `Tests` (the group's loaded packages that define a `TestCase` subclass, whatever they are called). A baseline without that group, or a load that did not include its test packages, falls back to the packages the load added whose names end in `-Tests`. `targets_from` says which rule applied; `load.tests_group` lists the group. Check targets, counts, failures and skips. Use `--skips-fail` if your policy treats skips as failures. Prepared template dependencies still matter; this does not validate every deployment environment.
 
 - Exit `1`: test failures or an operation error; read the response.
 - Exit `6`: baseline load rejected, including errors, warnings or undeclared names.

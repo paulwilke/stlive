@@ -103,3 +103,43 @@ StLiveCommandsHelpersTest >> testLevenshteinWithEmptyAndEqualStrings [
 	self assert: (commands levenshtein: '' to: 'abc') equals: 3.
 	self assert: (commands levenshtein: 'abc' to: 'abc') equals: 0
 ]
+
+{ #category : 'eval' }
+StLiveCommandsHelpersTest >> testAnExceptionAnsweredAsValueIsMarked [
+	| result |
+	result := OrderedDictionary new.
+	commands describeEvalValue: ZeroDivide new in: result args: Dictionary new.
+	self assert: (result at: 'value_is_exception').
+	self assert: ((result at: 'warning') includesSubstring: 'ZeroDivide').
+	result := OrderedDictionary new.
+	commands describeEvalValue: 42 in: result args: Dictionary new.
+	self deny: (result includesKey: 'value_is_exception').
+	self deny: (result includesKey: 'value')
+]
+
+{ #category : 'eval' }
+StLiveCommandsHelpersTest >> testPrintLimitReplacesTheValueSummary [
+	| result |
+	result := OrderedDictionary new.
+	commands describeEvalValue: (1 to: 200) asArray in: result args: (Dictionary new at: 'print_limit' put: 30; yourself).
+	self assert: ((result at: 'value') at: 'print') size equals: 30.
+	self should: [ commands describeEvalValue: 1 in: result args: (Dictionary new at: 'print_limit' put: 0; yourself) ] raise: StLiveFailure
+]
+
+{ #category : 'definitions' }
+StLiveCommandsHelpersTest >> testDefinitionOfAClassNamesWhatTonelWrites [
+	| definition |
+	definition := commands definitionOf: StLiveTestCase.
+	self assert: (definition at: 'name') asString equals: 'StLiveTestCase'.
+	self assert: (definition at: 'kind') equals: 'class'.
+	self assert: (definition at: 'superclass') asString equals: 'TestCase'.
+	self assert: (definition at: 'traits') isNil.
+	self assert: ((definition at: 'instance_variables') anySatisfy: [ :each | each asString = 'server' ])
+]
+
+{ #category : 'baselines' }
+StLiveCommandsHelpersTest >> testUnsavedChangesInTheBaselinePackagesRefuseAProtectedLoad [
+	server changes add: (OrderedDictionary new at: 'kind' put: 'method-compile'; at: 'saved' put: false; at: 'package' put: 'Mine'; yourself).
+	self shouldnt: [ commands refuseLoadOverUnsavedChangesIn: #( 'Other' ) ] raise: StLiveFailure.
+	self should: [ commands refuseLoadOverUnsavedChangesIn: #( 'Mine' 'Other' ) ] raise: StLiveFailure
+]

@@ -4,7 +4,7 @@
 //! debug sessions) lives in the image, so every invocation is short-lived.
 //!
 //! Exit codes: 0 ok · 1 command failed / exception in image / failing tests · 2 usage
-//!             3 image not running or unreachable · 4 protocol error · 5 timeout
+//!             3 image not running or unreachable · 4 protocol error · 5 the client stopped waiting (timeout)
 //!             6 `test run --fresh`: the baseline did not load cleanly (error, warnings or undeclared names)
 //!             130 / 143 `test run --fresh` interrupted by SIGINT / SIGTERM (the temporary instance is stopped)
 
@@ -80,6 +80,7 @@ enum Cmd {
     },
     /// List instances known in the state directory. Temporary ones (from `test run --fresh`) are marked, and so are
     /// the orphaned ones: their run is gone, or their image died.
+    #[command(alias = "list")]
     Instances {
         /// Stop and delete the orphaned temporary instances
         #[arg(long)]
@@ -116,9 +117,15 @@ enum Cmd {
     Status,
     /// Check reachability
     Ping,
-    /// Evaluate Smalltalk code ('-' reads stdin). Exceptions become debug sessions.
+    /// Evaluate Smalltalk code: the argument, '-' (or no argument) for stdin, or --file. Exceptions become debug sessions.
     Eval {
-        code: String,
+        code: Option<String>,
+        /// Read the code from this file ('-' reads stdin); for code of several lines
+        #[arg(long, conflicts_with = "code")]
+        file: Option<PathBuf>,
+        /// Characters of the value's printString to show in `print` (default 120; --full gives the whole text as well)
+        #[arg(long, env = "STLIVE_PRINT_LIMIT")]
+        print_limit: Option<u64>,
         /// Object reference used as `self`
         #[arg(long = "in")]
         receiver: Option<String>,
@@ -192,6 +199,9 @@ enum Cmd {
         /// After writing, compare image and files and fail if they still differ
         #[arg(long)]
         verify: bool,
+        /// Write even when a file was changed since the image last saw it (`save_conflict`): the image's version replaces the file's
+        #[arg(long)]
+        force: bool,
     },
     /// One-shot headless run of a program from Tonel sources in a FRESH image; stdout carries only the program's result
     Run {
@@ -248,6 +258,9 @@ enum Cmd {
         /// Also unload the stale packages; ones with unsaved changes or listed by another loaded baseline are kept (prune_skipped)
         #[arg(long)]
         prune: bool,
+        /// Refuse (nothing is loaded, error `unsaved_changes`) when the image has unsaved changes in the baseline's packages. Default: the files win and those changes are reported as superseded
+        #[arg(long)]
+        protect_unsaved: bool,
         #[arg(long)]
         timeout: Option<u64>,
     },
@@ -429,7 +442,9 @@ enum DebugCmd {
     /// Receiver of a frame as an inspectable object
     Receiver { session: String, frame_pos: Option<u64>, #[arg(long)] frame: Option<u64> },
     /// Evaluate code in a frame (temporaries visible; --frame N, default 0 = top frame)
-    Eval { session: String, code: String, #[arg(long, default_value_t = 0)] frame: u64, #[arg(long)] timeout: Option<u64>, #[arg(long)] full: bool, #[arg(long)] no_session: bool, #[arg(long)] ui: bool },
+    Eval { session: String, code: Option<String>, /// Read the code from this file ('-' reads stdin)
+        #[arg(long, conflicts_with = "code")] file: Option<PathBuf>, /// Characters of the value's printString to show in `print` (default 120)
+        #[arg(long, env = "STLIVE_PRINT_LIMIT")] print_limit: Option<u64>, #[arg(long, default_value_t = 0)] frame: u64, #[arg(long)] timeout: Option<u64>, #[arg(long)] full: bool, #[arg(long)] no_session: bool, #[arg(long)] ui: bool },
     /// CONTINUE the suspended execution (does not re-run; does not prove a fix)
     Resume { session: String, /// Smalltalk expression whose value the failed send answers
         #[arg(long)] value: Option<String>, #[arg(long)] timeout: Option<u64> },
@@ -490,6 +505,9 @@ impl Instance {
     }
     fn alive(&self) -> bool {
         self.pid().map(platform::pid_alive).unwrap_or(false)
+    }
+    fn alive_with_port(&self) -> bool {
+        self.alive() && self.port_info().is_some()
     }
 }
 
@@ -660,16 +678,101 @@ fn render_text(v: &Value, indent: usize, out: &mut String) {
     }
 }
 
+/// The error object of a failure the client reports. A `timeout` here means the client stopped waiting: the image
+/// did not answer, so the request may still be running (`may_still_run`). When the image itself interrupts code
+/// that runs too long it answers with `error.kind: "timeout"`, a debug session and `may_still_run: false`.
+fn error_object(err_code: &str, message: &str) -> Map<String, Value> {
+    let mut err = Map::new();
+    err.insert("code".into(), json!(err_code));
+    err.insert("message".into(), json!(message));
+    if err_code == "timeout" {
+        err.insert("client_timeout".into(), json!(true));
+        err.insert("may_still_run".into(), json!(true));
+    }
+    err
+}
+
 fn die(code: i32, err_code: &str, message: String, pretty: bool) -> ! {
-    emit(&json!({"ok": false, "error": {"code": err_code, "message": message}}), pretty);
+    emit(&json!({"ok": false, "error": Value::Object(error_object(err_code, &message))}), pretty);
     std::process::exit(code)
 }
 
 // ---------------------------------------------------------------- transport
 
+/// `<home>/state-dirs.txt`: the state directories `start` has used. None when only STLIVE_DIR is set: such an
+/// environment has no home of its own (see `init::home_dir`), and a list inside the state directory would be lost
+/// with the very mistake it is meant to explain.
+fn state_dirs_file() -> Option<PathBuf> {
+    let set = |name: &str| std::env::var(name).ok().filter(|v| !v.trim().is_empty());
+    match (set("STLIVE_HOME"), set("STLIVE_DIR")) {
+        (Some(h), _) => Some(PathBuf::from(h).join("state-dirs.txt")),
+        (None, Some(_)) => None,
+        (None, None) => Some(platform::home().join(".stlive").join("state-dirs.txt")),
+    }
+}
+
+/// Remember a state directory `start` has used, so that `not_running` can say where an instance of that name
+/// does run.
+fn remember_state_dir(dir: &Path) {
+    let dir = platform::absolute(dir);
+    let Some(file) = state_dirs_file() else { return };
+    let known = std::fs::read_to_string(&file).unwrap_or_default();
+    if known.lines().any(|l| Path::new(l) == dir) {
+        return;
+    }
+    let kept: Vec<&str> = known.lines().filter(|l| Path::new(l).is_dir()).collect();
+    let mut text = kept.join("\n");
+    if !text.is_empty() { text.push('\n'); }
+    text.push_str(&dir.display().to_string());
+    text.push('\n');
+    let _ = std::fs::write(&file, text);
+}
+
+/// Other state directories to look at when an instance is not found: every `.stlive` above the current directory
+/// and the ones `start` remembered.
+fn other_state_dirs(current: &Path) -> Vec<PathBuf> {
+    let current = platform::absolute(current);
+    let mut dirs: Vec<PathBuf> = Vec::new();
+    let mut cur = std::env::current_dir().unwrap_or_default();
+    loop {
+        dirs.push(cur.join(".stlive"));
+        if !cur.pop() { break; }
+    }
+    let known = state_dirs_file().and_then(|f| std::fs::read_to_string(f).ok()).unwrap_or_default();
+    dirs.extend(known.lines().map(PathBuf::from));
+    let mut out: Vec<PathBuf> = Vec::new();
+    for d in dirs {
+        let d = platform::absolute(&d);
+        if d != current && d.is_dir() && !out.contains(&d) {
+            out.push(d);
+        }
+    }
+    out
+}
+
+/// For `not_running`: where a running instance of this name is (another state directory), and which instances run
+/// in the directory that was searched. Empty when there is nothing to add.
+fn elsewhere_hint(inst: &Instance) -> String {
+    let running_in = |dir: &Path| Instance { dir: dir.to_path_buf(), name: inst.name.clone() }.alive_with_port();
+    let found: Vec<String> = other_state_dirs(&inst.dir).into_iter().filter(|d| running_in(d)).map(|d| d.display().to_string()).collect();
+    let mut here: Vec<String> = std::fs::read_dir(&inst.dir)
+        .map(|rd| rd.flatten().filter_map(|e| e.file_name().to_string_lossy().strip_suffix(".port.json").map(String::from)).collect())
+        .unwrap_or_default();
+    here.retain(|n| Instance { dir: inst.dir.clone(), name: n.clone() }.alive_with_port());
+    here.sort();
+    let mut hint = String::new();
+    if !found.is_empty() {
+        hint.push_str(&format!(". An instance '{}' is running in another state directory: {} (use --state-dir or STLIVE_DIR to reach it)", inst.name, found.join(", ")));
+    }
+    if !here.is_empty() {
+        hint.push_str(&format!(". Running here: {} (choose one with -i)", here.join(", ")));
+    }
+    hint
+}
+
 /// Talk to an instance; `Err((exit code, error code, message))` instead of exiting.
 fn try_call(inst: &Instance, cmd: &str, args: Value, read_timeout: Duration) -> Result<Value, (i32, &'static str, String)> {
-    let info = inst.port_info().ok_or_else(|| (3, "not_running", format!("Instance '{}' is not running (no port file in {}). Start it with: stlive start", inst.name, inst.dir.display())))?;
+    let info = inst.port_info().ok_or_else(|| (3, "not_running", format!("Instance '{}' is not running (no port file in {}). Start it with: stlive start{}", inst.name, inst.dir.display(), elsewhere_hint(inst))))?;
     let port = info["port"].as_u64().unwrap_or(0) as u16;
     let mut stream = TcpStream::connect_timeout(&format!("127.0.0.1:{}", port).parse().unwrap(), Duration::from_secs(3))
         .map_err(|e| (3, "unreachable", format!("Cannot reach instance '{}' on 127.0.0.1:{} ({}). It may have exited; run: stlive start", inst.name, port, e)))?;
@@ -680,7 +783,7 @@ fn try_call(inst: &Instance, cmd: &str, args: Value, read_timeout: Duration) -> 
     match stream.read_to_end(&mut buf) {
         Ok(_) => {}
         Err(e) if e.kind() == std::io::ErrorKind::WouldBlock || e.kind() == std::io::ErrorKind::TimedOut => {
-            return Err((5, "timeout", format!("No response within {:?}. The image may be busy; the request may still be running.", read_timeout)))
+            return Err((5, "timeout", format!("No response within {:?}: the client stopped waiting, the image did not answer. The request may still be running there; `stlive ping` shows whether the image responds.", read_timeout)))
         }
         Err(e) => return Err((3, "connection_lost", format!("Connection lost while waiting for the response: {}", e))),
     }
@@ -794,6 +897,15 @@ fn exit_code_with(resp: &Value, skips_fail: bool) -> i32 {
         return 1;
     }
     0
+}
+
+/// The code of an `eval`: the argument, `--file PATH`, or stdin (`-` in either place, or neither given).
+fn code_from(code: Option<String>, file: Option<PathBuf>, pretty: bool) -> String {
+    match (code, file) {
+        (Some(c), _) if c != "-" => c,
+        (None, Some(f)) if f.as_os_str() != "-" => std::fs::read_to_string(&f).unwrap_or_else(|e| die(2, "bad_file", format!("{}: {}", f.display(), e), pretty)),
+        _ => read_stdin(),
+    }
 }
 
 fn read_stdin() -> String {
@@ -981,6 +1093,7 @@ fn start_quiet(inst: &Instance, opts: StartOpts) -> Result<Value, (i32, &'static
     let deadline = Instant::now() + Duration::from_secs(wait_secs);
     while Instant::now() < deadline {
         if let Some(info) = inst.port_info() {
+            remember_state_dir(&inst.dir);
             return Ok(json!({"started": true, "pid": child.id(), "port": info["port"], "epoch": info["epoch"], "pharo": info["pharo"], "pharo_major": version, "log": log_path, "sources": src_dir}));
         }
         // the image quit (serve.st ends it when the server does not start): no point in waiting for the port file
@@ -1015,9 +1128,40 @@ fn log_line(path: &Path, line: &str) {
     }
 }
 
+/// What a stop would discard, from the image's `status`: suspended debug sessions, recorded changes not yet saved to
+/// files, and object references handed out (`obj-...`). None when the image does not say (a server older than 0.10
+/// reports no `unsaved_changes`), so the caller cannot tell.
+fn stop_losses(status: &Value) -> Option<Vec<(&'static str, u64)>> {
+    let r = &status["result"];
+    let counts = [
+        ("suspended debug session(s)", r["suspended_sessions"].as_u64()?),
+        ("unsaved change(s) (write them with `stlive save`)", r["unsaved_changes"].as_u64()?),
+        ("object reference(s) (`stlive obj release --all` gives them up)", r["object_refs"].as_u64()?),
+    ];
+    Some(counts.into_iter().filter(|(_, n)| *n > 0).collect())
+}
+
+/// `stop` without `--force` stops an instance that has nothing to lose: no suspended debug session, no unsaved
+/// recorded change, no object reference. Otherwise it refuses and says what would be lost. State that stlive cannot
+/// see (objects reachable only from globals of the image, a running server inside it) is not counted, which is why
+/// object references count: an image somebody worked in has them.
 fn stop(inst: &Instance, force: bool, pretty: bool) {
-    if !force {
-        die(2, "confirmation_required", "Stopping discards all unsaved image state and debug sessions. Re-run with --force (use `stlive image save` first to keep state).".into(), pretty);
+    if !force && inst.alive_with_port() {
+        let status = try_call(inst, "status", json!({}), Duration::from_secs(5)).ok().filter(|r| r["ok"] == json!(true));
+        let command = format!("`stlive -i {} stop --force` (use `stlive image save` first to keep the image state)", inst.name);
+        match status.as_ref().map(stop_losses) {
+            // the image is hung or gone: there is no state left to ask about
+            None => {}
+            Some(Some(losses)) if losses.is_empty() => {}
+            Some(Some(losses)) => {
+                let what: Vec<String> = losses.iter().map(|(label, n)| format!("{} {}", n, label)).collect();
+                let mut err = error_object("confirmation_required", &format!("Stopping would discard {}. Re-run with --force: {}.", what.join(", "), command));
+                err.insert("would_lose".into(), json!({"suspended_sessions": status.as_ref().unwrap()["result"]["suspended_sessions"], "unsaved_changes": status.as_ref().unwrap()["result"]["unsaved_changes"], "object_refs": status.as_ref().unwrap()["result"]["object_refs"]}));
+                emit(&json!({"ok": false, "error": Value::Object(err)}), pretty);
+                std::process::exit(2);
+            }
+            Some(None) => die(2, "confirmation_required", format!("Stopping discards all unsaved image state and debug sessions (this image runs an older stlive server that does not report what it holds). Re-run with --force: {}.", command), pretty),
+        }
     }
     stop_quiet(inst);
     // a temporary instance (kept by `test run --fresh --keep`) has no use after its stop: its files go too
@@ -1158,6 +1302,11 @@ fn clone_image(inst: &Instance, name: &str, start_it: bool, pretty: bool) {
 // ---------------------------------------------------------------- main
 
 fn main() {
+    // `stlive ... | head`: end quietly when the reader is gone instead of panicking in println!
+    #[cfg(unix)]
+    unsafe {
+        libc::signal(libc::SIGPIPE, libc::SIG_DFL);
+    }
     let cli = Cli::parse();
     let pretty = cli.pretty;
     TEXT_MODE.store(cli.text, std::sync::atomic::Ordering::Relaxed);
@@ -1202,10 +1351,11 @@ fn main() {
         Cmd::Stop { force } => return stop(&inst, force, pretty),
         Cmd::Status => ("status".into(), json!({}), None),
         Cmd::Ping => ("ping".into(), json!({}), None),
-        Cmd::Eval { code, receiver, timeout, full, no_session, no_source, ui } => {
-            let code = if code == "-" { read_stdin() } else { code };
+        Cmd::Eval { code, file, print_limit, receiver, timeout, full, no_session, no_source, ui } => {
+            let code = code_from(code, file, pretty);
             let mut m = Map::new();
             m.insert("code".into(), code.into());
+            opt(&mut m, "print_limit", print_limit);
             if full { m.insert("full".into(), true.into()); }
             if no_session { m.insert("no_session".into(), true.into()); }
             if no_source { m.insert("no_source".into(), true.into()); }
@@ -1366,11 +1516,12 @@ fn main() {
             DebugCmd::Frame { session, index, frame, no_source } => ("debug.frame".into(), json!({"session": session, "frame": index.or(frame).unwrap_or(0), "no_source": no_source}), None),
             DebugCmd::Locals { session, frame_pos, frame } => ("debug.locals".into(), json!({"session": session, "frame": frame_pos.or(frame).unwrap_or(0)}), None),
             DebugCmd::Receiver { session, frame_pos, frame } => ("debug.receiver".into(), json!({"session": session, "frame": frame_pos.or(frame).unwrap_or(0)}), None),
-            DebugCmd::Eval { session, code, frame, timeout, full, no_session, ui } => {
-                let code = if code == "-" { read_stdin() } else { code };
+            DebugCmd::Eval { session, code, file, print_limit, frame, timeout, full, no_session, ui } => {
+                let code = code_from(code, file, pretty);
                 let mut m = Map::new();
                 m.insert("session".into(), session.into());
                 m.insert("code".into(), code.into());
+                opt(&mut m, "print_limit", print_limit);
                 m.insert("frame".into(), frame.into());
                 if full { m.insert("full".into(), true.into()); }
                 if no_session { m.insert("no_session".into(), true.into()); }
@@ -1412,16 +1563,19 @@ fn main() {
         Cmd::Image(ImageCmd::Info) => ("image.info".into(), json!({}), None),
         Cmd::Image(ImageCmd::Export { out, keep_server, force }) => return export_image(&inst, &out, keep_server, force, pretty),
         Cmd::Image(ImageCmd::Clone { name, start: do_start }) => return clone_image(&inst, &name, do_start, pretty),
-        Cmd::Save { package, all, dir, dry_run, verify } => return save_changes(&inst, package, all, &dir, dry_run, verify, pretty),
+        Cmd::Save { package, all, dir, dry_run, verify, force } => return save_changes(&inst, package, all, &dir, dry_run, verify, force, pretty),
         Cmd::Run { load, packages, prepare, eval, file, timeout, keep, pharo, args } => return run_program(&inst, load, packages, prepare, eval, file, timeout, keep, pharo, args, pretty),
         Cmd::Drift { package, all, dir } => return drift_cmd(&inst, package, all, &dir, pretty),
-        Cmd::Load { baseline, repository, groups, prune, timeout } => {
+        Cmd::Load { baseline, repository, groups, prune, protect_unsaved, timeout } => {
             let mut m = Map::new();
             m.insert("name".into(), baseline.into());
             m.insert("repository".into(), repository.into());
             m.insert("groups".into(), json!(groups));
             if prune {
                 m.insert("prune".into(), true.into());
+            }
+            if protect_unsaved {
+                m.insert("protect_unsaved".into(), true.into());
             }
             opt(&mut m, "timeout", timeout);
             ("load.baseline".into(), Value::Object(m), Some(timeout.unwrap_or(600_000)))
@@ -1639,7 +1793,8 @@ fn drift_cmd(inst: &Instance, package: Option<String>, all: bool, dir: &Path, pr
     if !ok { std::process::exit(1); }
 }
 
-fn save_changes(inst: &Instance, package: Option<String>, all: bool, dir: &Path, dry_run: bool, verify: bool, pretty: bool) {
+#[allow(clippy::too_many_arguments)]
+fn save_changes(inst: &Instance, package: Option<String>, all: bool, dir: &Path, dry_run: bool, verify: bool, force: bool, pretty: bool) {
     if package.is_none() && !all {
         die(2, "missing_argument", "Give --package <Name> or --all. `stlive changes list` shows unsaved_by_package.".into(), pretty);
     }
@@ -1660,6 +1815,24 @@ fn save_changes(inst: &Instance, package: Option<String>, all: bool, dir: &Path,
                 "problem": "the change has no package (class created without one?), so it was NOT written; give the class a package and compile again"})),
         }
     }
+    // First pass, nothing written: every package is planned, so a conflict or an error in one of them leaves all
+    // files as they are.
+    let mut conflicts: Vec<Value> = Vec::new();
+    for (pkg, list) in &by_pkg {
+        match save::plan(list, pkg, dir, true) {
+            Ok(plan) => conflicts.extend(plan.conflicts),
+            Err(e) => die(1, "save_failed", format!("package {}: {}", pkg, e), pretty),
+        }
+    }
+    if !conflicts.is_empty() && !force {
+        let mut err = error_object("save_conflict", &format!(
+            "Nothing was written: {} method(s) were changed both in the image and in the files since the image read them. Compare both versions (`stlive method show`, the file), then either load the files (they replace the image's version) or run save --force (the image's version replaces the file's).",
+            conflicts.len()));
+        err.insert("conflicts".into(), json!(conflicts));
+        err.insert("dry_run".into(), json!(dry_run));
+        emit(&json!({"ok": false, "error": Value::Object(err)}), pretty);
+        std::process::exit(1);
+    }
     let mut files = Vec::new();
     let mut marked: Vec<u64> = Vec::new();
     for (pkg, list) in &by_pkg {
@@ -1677,6 +1850,9 @@ fn save_changes(inst: &Instance, package: Option<String>, all: bool, dir: &Path,
     let mut result = json!({"dry_run": dry_run, "packages": by_pkg.keys().collect::<Vec<_>>(), "changes": marked.len(), "files": files});
     if marked.is_empty() && warnings.is_empty() {
         result["note"] = json!("No unsaved changes recorded. Use `stlive drift` to compare the image with the files.");
+    }
+    if !conflicts.is_empty() {
+        result["conflicts_overwritten"] = json!(conflicts);
     }
     let mut ok = warnings.is_empty();
     if !warnings.is_empty() {
@@ -1793,6 +1969,33 @@ fn run_program(inst: &Instance, load: Vec<PathBuf>, packages: Vec<String>, prepa
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stop_counts_what_would_be_lost() {
+        let idle = json!({"ok": true, "result": {"suspended_sessions": 0, "unsaved_changes": 0, "object_refs": 0}});
+        assert_eq!(stop_losses(&idle), Some(vec![]));
+        let busy = json!({"ok": true, "result": {"suspended_sessions": 1, "unsaved_changes": 0, "object_refs": 4}});
+        let losses = stop_losses(&busy).unwrap();
+        assert_eq!(losses.iter().map(|(_, n)| *n).collect::<Vec<_>>(), vec![1, 4]);
+        // a server before 0.10 does not report unsaved changes: unknown, so the stop still needs --force
+        assert_eq!(stop_losses(&json!({"ok": true, "result": {"suspended_sessions": 0, "object_refs": 0}})), None);
+    }
+
+    #[test]
+    fn a_client_timeout_says_that_the_request_may_still_run() {
+        let e = error_object("timeout", "No response");
+        assert_eq!((e["code"].clone(), e["client_timeout"].clone(), e["may_still_run"].clone()), (json!("timeout"), json!(true), json!(true)));
+        assert!(!error_object("not_running", "x").contains_key("may_still_run"));
+    }
+
+    #[test]
+    fn eval_code_comes_from_the_argument_or_a_file() {
+        assert_eq!(code_from(Some("3 + 4".into()), None, false), "3 + 4");
+        let f = std::env::temp_dir().join(format!("stlive-code-{}.st", std::process::id()));
+        std::fs::write(&f, "| a |\na := 1.\na + 1").unwrap();
+        assert_eq!(code_from(None, Some(f.clone()), false), "| a |\na := 1.\na + 1");
+        let _ = std::fs::remove_file(&f);
+    }
 
     #[test]
     fn skipped_tests_fail_only_with_the_flag() {

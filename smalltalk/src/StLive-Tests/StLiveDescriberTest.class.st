@@ -34,6 +34,25 @@ StLiveDescriberTest >> testPrintIsLimited [
 ]
 
 { #category : 'print' }
+StLiveDescriberTest >> testSummaryCutsAtTheDefaultLimit [
+	| summary |
+	summary := describer summary: (1 to: 200) asArray.
+	self assert: (summary at: 'print') size <= describer defaultPrintLimit.
+	self assert: (summary at: 'print_truncated').
+	self assert: ((summary at: 'hint') beginsWith: 'cut at 120 characters')
+]
+
+{ #category : 'print' }
+StLiveDescriberTest >> testSummaryWithALimitShowsThatManyCharacters [
+	| summary |
+	summary := describer summary: (1 to: 200) asArray limit: 300.
+	self assert: (summary at: 'print') size equals: 300.
+	self assert: ((summary at: 'hint') beginsWith: 'cut at 300 characters').
+	summary := describer summary: #( 1 2 3 ) limit: 300.
+	self deny: (summary includesKey: 'print_truncated')
+]
+
+{ #category : 'print' }
 StLiveDescriberTest >> testFailingPrintIsReportedAsText [
 	| cls |
 	cls := self fixtureClassNamed: 'StLiveTestsBadPrint' superclass: Object package: 'StLiveTestsFixture'.

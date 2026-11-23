@@ -42,7 +42,16 @@ Most request commands print JSON containing `ok`, plus `result` or `error`. Use 
 - `changes watch`: a stream of JSON lines rather than one final response.
 - `--help` / `--version`: ordinary text.
 
-`test run` can return `ok: true` while reporting failed tests: the test operation completed, but the CLI exits 1. Inspect `ran`, `passed`, `failed`, `skipped` and the exit code, not only `ok`.
+`test run` can return `ok: true` while reporting failed tests: `ok` says that the run took place, and the CLI exits 1. Read `result.outcome` (`passed` or `failed`, as the exit code counts it), then `ran`, `passed`, `failed` and `skipped`.
+
+`eval` returns `ok: true` when the code answers an exception object instead of signalling it, for example from `on: Error do: [ :e | e ]`. Such a result carries `value_is_exception: true` and a `warning`.
+
+There are two kinds of timeout, and they mean different things:
+
+| What you see | What happened | Still running? |
+|---|---|---|
+| `error.kind: "timeout"` with `error.session`, exit `1` | The image interrupted code that ran longer than `--timeout` and kept it as a debug session. | No (`may_still_run: false`) |
+| `error.code: "timeout"` with `client_timeout: true`, exit `5` | The client stopped waiting; the image did not answer. | Possibly (`may_still_run: true`); check with `stlive ping` |
 
 Read errors even if an invocation completed quickly. A Pharo exception usually becomes an inspectable session; an unavailable image, invalid argument or broken connection does not necessarily create one. `eval --no-session` avoids retaining failed exploratory jobs. `--timeout` for live evaluations is in **milliseconds**; `run --timeout` is in **seconds**.
 
@@ -72,7 +81,9 @@ Read errors even if an invocation completed quickly. A Pharo exception usually b
 | Package-cache write error after copying a template | A snapshot may retain an absolute Monticello cache path. Correct `MCCacheRepository cacheDirectory:` in your own template and snapshot it; do not change another project's image or cache. |
 | `stale_ref` | Obtain a new object/session reference after the image restart. |
 | `unknown_ref` / `unknown_session` | Reference may have been released or evicted; inspect current state. |
-| Fresh tests ran nothing useful | Inspect targets; select test packages explicitly if they do not end in `-Tests`. |
+| Fresh tests ran nothing useful | Inspect `targets` and `targets_from`. Without targets, fresh mode runs the test packages of the baseline's group `Tests` if they are loaded (add `--group Tests`), else the added packages ending in `-Tests`. |
+| `not_running`, but the image is up | The message names the state directory that holds a running instance of that name, and the instances running in the directory that was searched. Fix `STLIVE_DIR` / `--state-dir` or `-i`. |
+| `save_conflict` | A method changed in the image and in its file. Nothing was written. Compare both, then `load` (the files win) or `save --force` (the image wins). |
 | Background work stopped | Inspect `image info` → `background_errors` and the log. |
 | `ui_unavailable` | UI process was busy or modal; resolve it before retrying. |
 | Old saved image hangs at startup | Images saved by ≤0.7.x may contain a stale acceptor. Preserve a backup; rebuild that disposable instance from the template and reload saved sources. |
