@@ -167,7 +167,7 @@ Stop the image (destructive: unsaved state and debug sessions are lost)
 Usage: stlive stop [OPTIONS]
 
 Options:
-      --force                  Required confirmation
+      --force                  Stop even when the image holds suspended sessions, unsaved changes or object references (without it, such an instance is not stopped and the error says what would be lost)
   -i, --instance <INSTANCE>    Instance name (several images can run side by side) [env: STLIVE_INSTANCE=] [default: default]
       --state-dir <STATE_DIR>  Directory holding instance state (port file, pid, log, config) [env: STLIVE_DIR=]
       --pretty                 Pretty-print JSON
