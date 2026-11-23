@@ -109,7 +109,7 @@ enum Cmd {
     },
     /// Stop the image (destructive: unsaved state and debug sessions are lost)
     Stop {
-        /// Required confirmation
+        /// Stop even when the image holds suspended sessions, unsaved changes or object references (without it, such an instance is not stopped and the error says what would be lost)
         #[arg(long)]
         force: bool,
     },

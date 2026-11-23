@@ -1,7 +1,7 @@
 # Changelog
 
 ## 0.10.0 – clearer answers, safer save
-The meaning of `ok`, of the exit codes and of a plain `load` is unchanged; everything here adds fields, options or refusals that did not exist. Sources of this round: a review against Pharo 14's own command line, and what the Orbit, Kompass and SmalltalkPrep sessions ran into.
+The meaning of `ok`, of the exit codes and of a plain `load` is unchanged; everything here adds fields, options or refusals that did not exist. Sources of this round: a review against Pharo 14's own command line, and what agents working in three projects ran into.
 
 **Answers**
 - **`test run` names its outcome**: `result.outcome` is `passed` or `failed`, as the exit code counts it (failures; skips with `--skips-fail`). `ok: true` keeps meaning "the run took place".

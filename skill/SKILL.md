@@ -1,58 +1,86 @@
 ---
 name: stlive
-description: Work inside a running Pharo (Smalltalk) image with the `stlive` CLI – evaluate code, inspect live objects, debug failing code frame by frame, fix methods in the running image, re-run, run tests and write the fix back to Tonel files. Use for Pharo/Smalltalk tasks where the behaviour of running code matters (failing tests, wrong results, unknown library internals).
+description: Use the `stlive` CLI for Pharo 13/14 (Smalltalk) tasks that need a running image or the project's stlive workflow – probing how code behaves, reloading edited Tonel files, running SUnit tests (also in a fresh image), examining a failure from its kept stack, and writing live changes back to Tonel. Not needed for reading or editing source files alone.
 ---
 
-# ST Live: compact working loop
+# stlive
 
-Use the existing project instance and baseline. Do not restart a shared image or reload files over unsaved live changes without coordinating with its owner. Live request commands return JSON with `ok`; read the actual result before choosing the next action.
+Request commands print JSON: `{"ok":true,"result":…}` or `{"ok":false,"error":…}` (`run` prints the program's own output). An error's `message` and `hint` usually name the next step. Read them and change the input; never resend an unchanged failed call. Exact options: `stlive <command> --help`.
 
-## Start with these operations
+## Which image
+
+- **The project decides.** When CLAUDE.md, AGENTS.md or the task names a reload or test script, an instance or a state directory, use those; such scripts wrap the commands below. Judge a script by its exit status and the test evidence it prints, and say so when it shows none.
+- Confirm the instance before you change image state: `stlive list` shows the instances, `stlive status` the one you address. Name it on **every** call (`stlive -i NAME …`; shell variables do not survive between tool calls). `STLIVE_DIR` / `--state-dir` selects the state directory.
+- Never stop, restart or reload an image someone else works in. On `not_running`, read the message: it may name the directory where that instance runs. Fix the name or path rather than starting a second image.
+- Stopping your own instance: try `stlive stop`. If it refuses, `error.would_lose` counts what the image still holds. Save or snapshot what the task needs, then `stop --force`.
+
+## Evaluate and look up
 
 ```sh
-stlive method show 'Cart>>total'
+stlive eval --no-session 'Cart new total'
+stlive eval --no-session <<'EOF'
+(Cart new add: (Item price: 3); yourself) total = 3
+EOF
+stlive eval --file probe.st
+stlive method show 'Cart>>total'          # class side: 'Cart class>>new'
 stlive class show Cart
-stlive find implementors lookupCode:ifAbsent:
-stlive eval - < reproduce.st
-stlive debug frames <session> --limit 5
-stlive debug frame <session> <index>
-stlive debug eval <session> --frame <index> 'subtotal'
-stlive method compile Cart --file total.st
-stlive debug rerun <session>
-stlive test run 'CartTest'
+```
+
+- Code with several lines or string literals goes through a quoted heredoc (`<<'EOF'`) or `--file`, never inside a single-quoted shell argument.
+- Use `--no-session` for exploration, so a failed snippet leaves no suspended session.
+- **Let errors signal.** Do not wrap code in `on: Error do: [ :e | e ]` to see an error: stlive already reports its type, message and top frame. An exception answered as a value comes back as `ok: true` with `result.value_is_exception: true`; unless you meant to get an exception object, your code failed.
+- End a check with a comparison (`… total = 3`); an expression that merely completes proves nothing.
+- Read real selectors before calling them (`class show`); an instance variable has no getter unless one is defined.
+- Pipe JSON straight into `jq`, or use `printf '%s' "$out" | jq …` for captured output (`echo` can break the JSON).
+
+## Change code: one path per method
+
+**Files first** – edit the Tonel files, then reload:
+
+```sh
+stlive load MyApp --repository "tonel://$PWD/src" --group Tests
+stlive test run 'MyApp-Tests'
+```
+
+`load` lets the files win: unsaved live changes in the reloaded packages are replaced (`modified_packages_overwritten`). If this image may hold live edits you have not saved, add `--protect-unsaved`: the load is then refused instead (`unsaved_changes`).
+
+**Live first** – change the image, then write it back:
+
+```sh
+stlive method compile Cart --file total.st     # selector and body, no Tonel wrapper
+stlive test run CartTest
 stlive save --package MyApp --dir src --verify
 ```
 
-Use real names from the project and real session IDs returned by the tool. A method file contains the selector and body, not a Tonel class wrapper. Preserve the existing protocol; a new method needs `--protocol`. For code containing Smalltalk strings, prefer `--file` or stdin over nested shell quotes.
+`save` writes nothing on `save_conflict`: a file changed after the image read it. Compare both versions before choosing: `load` keeps the file's, `save --force` the image's.
 
-`Cart>>total` is an instance method: call it on an instance such as `Cart new`, using the project's actual initialization. `Cart class>>...` is class-side. Read existing source and selectors before inventing APIs. Follow `did_you_mean` suggestions only after checking their meaning.
+Do not change the same method in a file and live between one load and the next save.
 
-## Repair and inspect
+## What counts as success
 
-Reproduce the reported behavior or run the relevant test. An exception can return `error.session` and `first_application_frame`; inspect a small page of frames, then the relevant frame's source and variables. Follow object references only as needed. If the task supplies a live object, inspect it with `obj show`, keep its reference, compile on its class and use `eval --in REF` to call the new method on that same instance. Do not replace it when state or identity must survive. An instance variable does not automatically provide a getter.
+`ok: true` says the command ran, not that the result is good.
 
-Compile the smallest justified change. Check the original failure plus relevant edge cases, preferably with explicit Boolean comparisons or assertions. After an error, read its message and stack; change the input or strategy before retrying rather than repeating an unchanged failed call.
+- **eval**: the value you expected.
+- **load**: `result.loaded.undeclared` and `result.loaded.warnings` are empty. Neither fails a plain load, but both fail a fresh run.
+- **test run**: exit 0 and `result.outcome: "passed"`, with the `targets` you meant, `ran` > 0 and `skipped` checked. Red tests give `ok: true`, `outcome: "failed"`, exit 1.
+- **test run --fresh**: the same. Without targets it picks the baseline's group `Tests`, or else added packages ending in `-Tests`; `result.targets_from` says which. Exit 6: the baseline did not load cleanly (errors, warnings or undeclared names).
+- **save --verify / drift**: exit 0 means image and files agree in what `compared` lists. They never check behaviour.
+- **Exit 5** (`client_timeout: true`): the client gave up waiting and the request may still run. Check with `stlive ping` before resending anything that changes state.
 
-- `debug resume` continues the old execution; existing frames may still use old methods.
-- `debug restart` restarts one frame; it does not reset the image or object state.
-- `debug rerun` executes the original operation again in the **same image**. `fresh_execution: true` does not mean a fresh image, rollback, or verified repair. Earlier side effects remain.
+A failure that its message does not explain may have left a debug session: `error.session` after an eval, `result.groups[].sessions` after red tests. [Reference §7](references/workflows.md) shows how to read its frames and re-run after a fix.
 
-For a small, stateless source-editing task, ordinary Pharo scripts and tests in a separate fresh image are also valid. Use live sessions when preserved runtime state helps; ST Live is not required for every Pharo operation.
+## Done means – when you changed code
 
-## Finish with evidence
+A lookup or behaviour check that changed nothing needs none of this: report what you found and how you checked it.
 
-Check behavior against the requested contract, including relevant edge cases. Use actual fixture values; an expression completing successfully does not prove its answer is correct. When adding a regression test, establish that it detects the original bug where practical.
+1. Follow the project's own gates when it has them.
+2. Image and files agree: `stlive save --all --dir src --verify` after live changes, `stlive drift --all --dir src` after file edits.
+3. `git diff -- src` shows only intended changes.
+4. A clean image passes: `stlive test run --fresh --load MyApp --repository "tonel://$PWD/src" --group Tests`.
+5. Report what changed, which checks ran with their counts, what was saved and what remains unverified. Never claim a check you did not run.
 
-Save the changed packages, inspect the Git diff, and check source agreement with `save --verify` or `drift`. These commands **do not run acceptance tests**. For a project with a local Metacello baseline, check the saved files separately:
+Replace `MyApp`, `Cart`, `src` and `Tests` with the project's real names.
 
-```sh
-stlive test run --fresh --load MyApp --repository "tonel://$PWD/src" --group Tests
-```
+## More
 
-Replace `MyApp` and `Tests` with the project's actual baseline and group. This uses a temporary image from the installed template, which may contain prepared dependencies; it does not validate arbitrary deployment environments. Check the returned targets, counts and skipped tests. `test run` may return `ok: true` with failed tests and exit 1; inspect counts and exit status. A zero-test run is not evidence that the requested behavior passed. If a fresh check is unavailable, say so.
-
-Report what changed, which checks actually ran and their results, whether files were saved, and what remains unverified. Do not infer success from a command name or claim checks you did not run. Keep unresolved debugger sessions available if needed; clean up only your own task's sessions.
-
-## More detail when needed
-
-Read [workflows and troubleshooting](references/workflows.md) for setup, baseline reload behavior, paged objects, traits, GUI/UI-process work, export, exit codes and troubleshooting. Use `stlive <command> --help` for exact arguments. Load only the relevant section rather than the entire reference for a small task.
+[references/workflows.md](references/workflows.md): instances, result fields and exit codes, object inspection, print limits, load/save/drift details, tests and fresh runs, debugging, GUI, `run`/export, Pharo pitfalls (class definitions), troubleshooting. Read only the section you need.
