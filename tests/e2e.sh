@@ -263,6 +263,7 @@ out=$($S -i second eval '6 * 7'); check "attached instance answers" '.result.val
 out=$($S eval 'Object new'); OLD=$(echo "$out" | jq -r .result.value.ref)
 $S stop --force >/dev/null; $S start >/dev/null
 out=$($S obj show "$OLD"); check "stale reference detected after restart" '.error.code' stale_ref
+$S eval 'Object new' >/dev/null   # an instance that holds something (here an object reference) is not stopped without --force
 out=$($S stop); check "stop needs --force" '.error.code' confirmation_required
 
 # --- 0.6: recording survives a failing test run (suppression is per process)
@@ -697,5 +698,119 @@ $S -i vma stop --force >/dev/null
 out=$(STLIVE_HOME="$WORK/inithome" $S init --pharo 12 2>&1); check "init --pharo 12 is refused" '.error.code' init_failed
 out=$(STLIVE_HOME="$WORK/inithome" $S init --pharo 99 --vm "$(jq -r .vm "$STLIVE_HOME/config.json")" --image "$(jq -r .image "$STLIVE_HOME/config.json")" 2>&1); check "init --pharo that contradicts the given image is refused" '.error.code' init_failed
 [ ! -e "$WORK/inithome/pharo/Pharo.image" ] && { pass=$((pass+1)); echo "ok   - a refused init copied nothing"; } || { fail=$((fail+1)); echo "FAIL - refused init copied files"; }
+
+# --- 0.10: eval says more and takes code from a file
+okif() { if [ "$1" = 0 ]; then pass=$((pass+1)); echo "ok   - $2"; else fail=$((fail+1)); echo "FAIL - $2"; fi; }
+out=$($S eval '(1 to: 200) asArray' --print-limit 300); check "eval --print-limit shows that many characters" '.result.value.print|length' 300
+out=$(STLIVE_PRINT_LIMIT=20 $S eval '(1 to: 200) asArray'); check "STLIVE_PRINT_LIMIT sets the limit" '.result.value.hint|startswith("cut at 20 ")'
+out=$($S eval '(1 to: 200) asArray'); check "the default limit is still 120" '.result.value.hint|startswith("cut at 120 ")'
+out=$($S eval '[ Dictionary new at: #x ] on: Error do: [ :e | e ]'); check "an exception answered as the value is marked; ok stays true" '[.ok,.result.value_is_exception]|join(",")' 'true,true'
+out=$($S eval '3 + 4'); check "an ordinary value carries no exception mark" '.result.value_is_exception' null
+printf '| a |\na := 20.\na + 22' > code.st
+out=$($S eval --file code.st); check "eval --file" '.result.value.print' 42
+out=$(printf '1 + 1' | $S eval); check "eval without an argument reads stdin" '.result.value.print' 2
+out=$($S eval --file nosuch.st); check "eval --file of a missing file" '.error.code' bad_file
+out=$($S eval '[ true ] whileTrue: [ 1 + 1 ]' --timeout 500); check "a timeout in the image has a session and cannot still run" '[(.error.session|startswith("dbg-")),.error.may_still_run]|join(",")' 'true,false'
+$S debug terminate --all >/dev/null
+
+# --- 0.10: a test run names its outcome; ok and the exit code keep their meaning
+$S class create OutcomeTest --superclass TestCase --package Outcome-Tests >/dev/null
+$S method compile OutcomeTest --protocol t - <<< $'testOk\n\tself assert: true' >/dev/null
+out=$($S test run OutcomeTest); RC=$?
+check "green tests: outcome is passed" '[.ok,.result.outcome]|join(",")' 'true,passed'
+okif $([ "$RC" -eq 0 ]; echo $?) "green tests exit 0"
+$S method compile OutcomeTest --protocol t - <<< $'testRed\n\tself assert: false' >/dev/null
+out=$($S test run OutcomeTest); RC=$?
+check "red tests: ok stays true, outcome is failed" '[.ok,.result.outcome,.result.failed]|join(",")' 'true,failed,1'
+okif $([ "$RC" -eq 1 ]; echo $?) "red tests still exit 1"
+$S debug terminate --all >/dev/null
+
+# --- 0.10: not_running says where the instance is; list; stop names the command; a closed pipe ends quietly
+out=$($S -i nosuch ping); check "not_running lists the instances running here" '.error.message|contains("Running here: default")'
+mkdir -p "$WORK/otherstate"
+out=$(STLIVE_DIR="$WORK/otherstate" $S ping); check "not_running finds the instance in another state directory" '.error.message|contains("is running in another state directory")'
+out=$($S list); check "list is an alias of instances" '[.result.instances[]|select(.name=="default")]|length' 1
+out=$($S stop); check "stop without --force names the full command" '.error.message|contains("stlive -i default stop --force")'
+err=$( { $S eval '(1 to: 30000) asArray' --full | head -c 10 >/dev/null; } 2>&1 )
+okif $([ -z "$err" ]; echo $?) "a reader that closes the pipe causes no panic ($err)"
+
+# --- 0.10: save refuses to overwrite a method that changed in the file as well
+mkdir -p csrc
+$S class create Conf --package ConfDemo >/dev/null
+$S method compile Conf --protocol x - <<< $'one\n\t^ 1' >/dev/null
+$S method compile Conf --protocol x - <<< $'two\n\t^ 2' >/dev/null
+out=$($S save --package ConfDemo --dir csrc); check "conflict demo saved" '.ok'
+$S method compile Conf --protocol x - <<< $'one\n\t^ 10' >/dev/null
+$S method compile Conf --protocol x - <<< $'two\n\t^ 20' >/dev/null
+sed -i.bak 's/\^ 1$/^ 100/' csrc/ConfDemo/Conf.class.st
+out=$($S save --package ConfDemo --dir csrc --dry-run); check "save --dry-run reports the conflict" '.error.code' save_conflict
+check "the conflict names method and file" '[.error.conflicts[0].method,(.error.conflicts[0].file|endswith("Conf.class.st")),(.error.conflicts|length)]|join(",")' 'Conf>>one,true,1'
+out=$($S save --package ConfDemo --dir csrc); RC=$?
+check "save refuses on a conflict" '.error.code' save_conflict
+okif $([ "$RC" -eq 1 ]; echo $?) "a save conflict exits 1"
+okif $(grep -q '\^ 100$' csrc/ConfDemo/Conf.class.st && grep -q '\^ 2$' csrc/ConfDemo/Conf.class.st; echo $?) "a refused save writes nothing, not even the methods without conflict"
+out=$($S changes list); check "the changes stay unsaved after a refused save" '.result.unsaved_by_package.ConfDemo' 2
+out=$($S save --package ConfDemo --dir csrc --force); check "save --force writes and lists what it overwrote" '.result.conflicts_overwritten[0].method' 'Conf>>one'
+okif $(grep -q '\^ 10$' csrc/ConfDemo/Conf.class.st && grep -q '\^ 20$' csrc/ConfDemo/Conf.class.st; echo $?) "save --force wrote the image's versions"
+# an edit in the file that the image then also makes is no conflict
+$S method compile Conf --protocol x - <<< $'two\n\t^ 21' >/dev/null
+sed -i.bak 's/\^ 20$/^ 21/' csrc/ConfDemo/Conf.class.st
+out=$($S save --package ConfDemo --dir csrc); check "the same change on both sides is no conflict" '.ok'
+
+# --- 0.10: save writes a changed superclass; drift compares class definitions and says what it compared
+$S eval --no-session "(Model << #Conf) package: 'ConfDemo'; install. 1" >/dev/null
+out=$($S save --package ConfDemo --dir csrc --verify); check "save --verify after a superclass change" '.ok'
+okif $(grep -q "#superclass : 'Model'" csrc/ConfDemo/Conf.class.st; echo $?) "the new superclass is in the file"
+check "verify names what it compared" '.result.verify[0].compared|length' 3
+check "verify names what it did not compare" '.result.verify[0].not_compared|length>0'
+sed -i.bak "s/#superclass : 'Model'/#superclass : 'Object'/" csrc/ConfDemo/Conf.class.st
+out=$($S drift --package ConfDemo --dir csrc); check "drift detects a different superclass" '.result.packages[0].definitions_different[0]|[.class,.field,.image,.files]|join(",")' 'Conf,superclass,Model,Object'
+check "that is drift" '.result.drift' true
+
+# --- 0.10: load --protect-unsaved refuses to replace unsaved image changes; plain load still lets the files win
+$S method compile LoadThing - <<< $'answer\n\t^ 77' >/dev/null
+out=$($S load LoadDemo --repository "tonel://$WORK/lsrc" --protect-unsaved); check "load --protect-unsaved refuses" '.error.code' unsaved_changes
+out=$($S eval 'LoadThing new answer'); check "nothing was loaded" '.result.value.print' 77
+out=$($S load LoadDemo --repository "tonel://$WORK/lsrc"); check "plain load: the files win, as before" '.result.loaded.modified_packages_overwritten|index("LoadDemo")!=null'
+out=$($S load LoadDemo --repository "tonel://$WORK/lsrc" --protect-unsaved); check "load --protect-unsaved without unsaved changes loads" '.ok'
+
+# --- 0.10: test run --fresh without targets runs the test packages of the baseline's group Tests
+mkdir -p grpsrc/BaselineOfE2EGrp grpsrc/E2EGrp grpsrc/E2EGrp-Checks
+printf "Package { #name : 'BaselineOfE2EGrp' }\n" > grpsrc/BaselineOfE2EGrp/package.st
+printf "Package { #name : 'E2EGrp' }\n" > grpsrc/E2EGrp/package.st
+printf "Package { #name : 'E2EGrp-Checks' }\n" > grpsrc/E2EGrp-Checks/package.st
+baseline grpsrc/BaselineOfE2EGrp/BaselineOfE2EGrp.class.st BaselineOfE2EGrp "spec package: 'E2EGrp'. spec package: 'E2EGrp-Checks' with: [ spec requires: #('E2EGrp') ]. spec group: 'default' with: #('E2EGrp'). spec group: 'Tests' with: #('E2EGrp-Checks')"
+printf "Class {\n\t#name : 'E2EGrpThing',\n\t#superclass : 'Object',\n\t#package : 'E2EGrp'\n}\n\n{ #category : 'x' }\nE2EGrpThing >> answer [\n\t^ 42\n]\n" > grpsrc/E2EGrp/E2EGrpThing.class.st
+printf "Class {\n\t#name : 'E2EGrpCheck',\n\t#superclass : 'TestCase',\n\t#package : 'E2EGrp-Checks'\n}\n\n{ #category : 'x' }\nE2EGrpCheck >> testAnswer [\n\tself assert: E2EGrpThing new answer equals: 42\n]\n" > grpsrc/E2EGrp-Checks/E2EGrpCheck.class.st
+out=$($S test run --fresh --load E2EGrp --repository "tonel://$WORK/grpsrc"); RC=$?
+check "fresh: the default group holds no tests" '.error.code' no_tests_matched
+check "fresh: the message points to --group Tests" '.error.message|contains("--group Tests")'
+out=$($S test run --fresh --load E2EGrp --repository "tonel://$WORK/grpsrc" --group Tests); RC=$?
+check "fresh: targets come from the group Tests, whatever the package is called" '[(.result.targets|join(",")),.result.targets_from]|join(" | ")' 'E2EGrp-Checks | group Tests of the baseline'
+check "fresh: ran the group's tests, outcome passed" '[.result.ran,.result.outcome]|join(",")' '1,passed'
+check "fresh: the load reports the group" '.result.load.tests_group.test_packages|join(",")' 'E2EGrp-Checks'
+okif $([ "$RC" -eq 0 ]; echo $?) "fresh: green run exits 0"
+out=$($S test run --fresh --load E2EFresh --repository "tonel://$WORK/freshsrc"); check "fresh: a baseline without a group Tests keeps the -Tests rule" '[(.result.targets|join(",")),.result.targets_from]|join(" | ")' 'E2EFresh-Tests | packages the load added that end in -Tests'
+
+# --- 0.10: stop without --force stops an instance that has nothing to lose, and says what would be lost otherwise
+out=$($S -i idle start); check "idle instance started" '.ok'
+out=$($S -i idle stop); RC=$?
+check "an instance with nothing to lose stops without --force" '.result.stopped'
+okif $([ "$RC" -eq 0 ]; echo $?) "that stop exits 0"
+$S -i idle start >/dev/null
+$S -i idle eval 'OrderedCollection new' >/dev/null
+out=$($S -i idle stop); RC=$?
+check "an instance holding an object reference is not stopped" '[.error.code,.error.would_lose.object_refs]|join(",")' 'confirmation_required,1'
+okif $([ "$RC" -eq 2 ]; echo $?) "the refused stop exits 2"
+out=$($S -i idle ping); check "and it is still running" '.result.pong'
+$S -i idle obj release --all >/dev/null
+$S -i idle class create StopDemo --package StopDemo >/dev/null
+out=$($S -i idle stop); check "unsaved changes are named" '[.error.would_lose.unsaved_changes,(.error.message|contains("unsaved change"))]|join(",")' '1,true'
+out=$($S -i idle stop --force); check "stop --force stops as before" '.result.stopped'
+
+# --- 0.10: the class-definition messages of older Pharo versions get a hint to the current way
+out=$($S eval --no-session "Object subclass: #E2EOldStyle instanceVariableNames: 'a' classVariableNames: '' package: 'E2EOld'")
+check "an old class-definition message is not understood and gets a hint" '[.error.type,(.error.hint|contains("Object << #Foo"))]|join(",")' 'MessageNotUnderstood,true'
+out=$($S eval --no-session "3 zork"); check "other unknown messages get no such hint" '.error.hint' null
 
 echo; echo "passed: $pass, failed: $fail"; [ $fail -eq 0 ]

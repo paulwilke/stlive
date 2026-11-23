@@ -44,3 +44,14 @@ StLiveSuggestionsTest >> testAtMostFiveSuggestionsAreAnswered [
 	receiver := (Smalltalk at: #StLiveTestsSuggest) new.
 	self assert: (commands suggestionsFor: #checkZ: receiver: receiver) size equals: 5
 ]
+
+{ #category : 'tests' }
+StLiveSuggestionsTest >> testOldClassDefinitionMessagesGetAHintToTheFluidBuilder [
+	| hint |
+	hint := commands classDefinitionHintFor: #subclass:instanceVariableNames:classVariableNames:package: receiver: Object.
+	self assert: (hint includesSubstring: 'Object << #Foo').
+	self assert: (hint includesSubstring: 'stlive class create').
+	self assert: (commands classDefinitionHintFor: #variableSubclass:instanceVariableNames:classVariableNames:category: receiver: Object) notNil.
+	self assert: (commands classDefinitionHintFor: #subclass:instanceVariableNames:classVariableNames:package: receiver: 3) isNil.
+	self assert: (commands classDefinitionHintFor: #zork: receiver: Object) isNil
+]

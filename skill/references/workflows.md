@@ -16,7 +16,7 @@ Re-running `load` after editing files updates the loaded packages: packages chan
 
 ## The loop
 1. **Reproduce** with `eval` or `test run`. A failure is not a tool error: it becomes a **debug session** that keeps the stack alive.
-   - `stlive eval '<code>'` (`-` reads stdin; `--timeout ms` turns endless loops into a session; `--in <ref>` sets `self`). Result: `result.value.{class,print,ref}`, `result.output.{transcript,deprecations}`. Failure: `error.{type,message,session,first_application_frame}` (and `error.recursion` for endless recursion).
+   - `stlive eval '<code>'` (`-` or no argument reads stdin, `--file f` a file; `--timeout ms` turns endless loops into a session; `--in <ref>` sets `self`). Result: `result.value.{class,print,ref}`, `result.output.{transcript,deprecations}`. Failure: `error.{type,message,session,first_application_frame}` (and `error.recursion` for endless recursion).
    - `stlive test run <TestClass | Class>>test | Package>` → `result.{ran,passed,failed,skipped}` and `result.groups[]` (failures grouped by cause, first application frame, one representative session each). It runs what SUnit runs: inherited test methods of an abstract superclass included, an abstract class runs its concrete subclasses, a `ParametrizedTestCase` once per parameter combination (reported as `Class>>sel (#param->value)`; that string is also a valid target). Skipped tests (`self skip`) are listed in `skipped_tests` and are neither passed nor failed; `--skips-fail` makes the exit code 1 when any test was skipped (use it when the project's policy says skips are failures). `stlive test list <glob>` finds test classes. Several targets and patterns run as one run: `stlive test run 'App-*-Tests' 'Foo>>testBar'`.
    - For a clean check (does the baseline load into a fresh image, do the tests pass there) use `stlive test run --fresh --load <Baseline> --repository tonel://$PWD/src [--group Tests]` – exit 6 means the load failed (see `error.load_error` and `result.load.undeclared`); `--keep` leaves the instance for `stlive -i <name> debug …`. Prefer the built-in fresh runner when it fits the project.
 2. **Navigate in small steps** (never print the whole stack):
@@ -65,7 +65,15 @@ For web UIs run `stlive open-ui <url>` (chromeless Chrome/Edge window) instead �
 - A `MessageNotUnderstood` error lists `did_you_mean` – real selectors of the receiver. Use them instead of guessing from memory; `find implementors <selector>` shows where a selector lives.
 - A `value.hint` means the printed value was cut; use `eval --full` or `obj text <ref>`.
 - Quoting: code with Smalltalk string literals (`'…'`) inside a single-quoted shell argument loses its quotes; use stdin: `stlive eval - <<'EOF' … EOF`.
-- `print` fields are truncated at 120 characters; get the full text with `obj text <ref>` or page with `obj items`.
+- `print` fields are truncated at 120 characters; get the full text with `obj text <ref>` or page with `obj items`. `eval --print-limit N` (or `STLIVE_PRINT_LIMIT=N`) shows more.
+- Code of several lines: `stlive eval --file snippet.st`, or stdin (`stlive eval - <<'EOF' … EOF`; a missing argument reads stdin too).
+- `result.value_is_exception: true`: your code answered an exception object (`on: Error do: [ :e | e ]`) – `ok` is true, but it is a failure of your code, not a value.
+- `test run`: read `result.outcome` (`passed` / `failed`); `ok: true` only says the run took place.
+- Two timeouts: `error.kind: "timeout"` with a `session` – the image stopped the code (`may_still_run: false`); `error.code: "timeout"` with `client_timeout: true` (exit 5) – the client gave up and the request may still be running.
+- `save_conflict`: the file changed after the image read it and nothing was written. Look at both versions; `load` takes the file's, `save --force` the image's. Do not reach for `--force` without looking.
+- `stop` without `--force` only stops an instance with nothing to lose; when it refuses, the message says what would be lost (sessions, unsaved changes, object references). Save first if the changes matter.
+- Define classes with `stlive class create` or `Object << #Foo slots: { #a }; package: 'Pkg'; install`; `subclass:instanceVariableNames:classVariableNames:package:` no longer exists.
+- `not_running`: read the message – it names the state directory where that instance runs, and the instances running in the directory searched.
 - Endless recursion: a timeout session; read `error.recursion.cycle` to see the repeating frames.
 - Output of `Transcript show:` and deprecation warnings arrive in `result.output`, not mixed into values.
 - `eval --no-session` for exploratory snippets so typos do not leave suspended sessions; `eval --full` for the complete text of a value.

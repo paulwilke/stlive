@@ -323,8 +323,10 @@ pub fn template(home: &Path, version: Option<u32>) -> Option<Template> {
     }
 }
 
-/// Arguments after the image that run `script` and keep the VM alive: Pharo before 14 quits after `st` unless told
-/// `--no-quit`; Pharo 14 (Clap command line) keeps running by default and rejects `--no-quit`.
+/// Arguments after the image that run `script` and keep the VM alive. `st` keeps the image running by default on
+/// Pharo 13 and 14 (it quits only with `--quit`). Before 14 stlive has always passed `--no-quit`, which Pharo 13's
+/// handler ignores; Pharo 14 (Clap command line) rejects the flag, so it is left out there. The flag stays for the
+/// older versions until a run without it is part of the Pharo 13 tests.
 pub fn st_serve_args(version: u32, script: &Path) -> Vec<std::ffi::OsString> {
     let mut a: Vec<std::ffi::OsString> = vec!["st".into(), script.into()];
     if version < 14 {

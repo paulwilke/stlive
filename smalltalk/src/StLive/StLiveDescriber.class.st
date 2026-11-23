@@ -33,14 +33,25 @@ StLiveDescriber >> isInline: obj [
 
 { #category : 'objects' }
 StLiveDescriber >> summary: obj [
+	^ self summary: obj limit: self defaultPrintLimit
+]
+
+{ #category : 'objects' }
+StLiveDescriber >> defaultPrintLimit [
+	^ 120
+]
+
+{ #category : 'objects' }
+StLiveDescriber >> summary: obj limit: limit [
+	"limit: the number of characters of the printString to show (eval --print-limit)."
 	| d p |
 	d := OrderedDictionary new.
 	d at: 'class' put: obj class printString.
-	p := self print: obj limit: 120.
+	p := self print: obj limit: limit.
 	d at: 'print' put: p.
-	(p size > 120 or: [ p endsWith: '[..]' ]) ifTrue: [
+	(p size > limit or: [ p endsWith: '[..]' ]) ifTrue: [
 		d at: 'print_truncated' put: true.
-		d at: 'hint' put: ((self isInline: obj) ifTrue: [ 'cut at 120 characters; eval --full gives the whole text' ] ifFalse: [ 'cut at 120 characters; `obj text <ref>` or eval --full gives the whole text' ]) ].
+		d at: 'hint' put: 'cut at ' , limit printString , ((self isInline: obj) ifTrue: [ ' characters; eval --full gives the whole text' ] ifFalse: [ ' characters; `obj text <ref>` or eval --full gives the whole text' ]) ].
 	(self isInline: obj) ifFalse: [ d at: 'ref' put: (server refFor: obj) ].
 	^ d
 ]

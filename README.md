@@ -60,7 +60,7 @@ For simple batch work, Pharo's built-in evaluation, scripts and test runner may 
 | `debug resume` | Continue the suspended execution, including frames that may use old methods. |
 | `debug restart --frame N` | Restart one frame; surrounding object state is retained. |
 | `debug rerun` | Execute the original operation again in the same image. Earlier side effects remain. |
-| `save --verify` / `drift` | Compare live code with Tonel files; no behavioral tests are run. |
+| `save --verify` / `drift` | Compare live code with Tonel files (method sources, class definitions; the report lists what was compared); no behavioral tests are run. |
 | `test run` | Run selected tests in the current image. Check targets, counts and skips. |
 | `test run --fresh` | Load a baseline and run tests in a temporary image based on the installed template. Save first to test your changes. |
 
@@ -81,7 +81,8 @@ Other shell-capable agents can read the same instructions. Guidance does not gua
 
 - `save` writes source files; `image save` snapshots the image. They preserve different things.
 - `stop --force` discards image state not snapshotted. Save source changes before stopping; see [storage and lifecycle](docs/operations.md#storage-and-lifecycle).
-- Reloading a baseline lets files overwrite modified packages in the image. Save live changes first if you want to retain them.
+- Reloading a baseline lets files overwrite modified packages in the image. Save live changes first if you want to retain them, or use `load --protect-unsaved` to have the load refused instead.
+- `save` refuses to overwrite a method that was changed in its file after the image read it (`save_conflict`); `save --force` lets the image win.
 - The server accepts arbitrary Smalltalk on loopback, **without authentication**. Keep it local; use `image export` to remove it from an exported application image.
 - `attach` needs an existing compatible JSON-line evaluation endpoint. It cannot attach to an arbitrary Pharo process by PID. See [attaching](docs/operations.md#attach-to-an-existing-image).
 

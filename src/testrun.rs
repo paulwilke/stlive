@@ -8,7 +8,7 @@
 //! `stlive start` makes), the baseline is loaded (`load.baseline`), the tests run, and the instance is stopped and
 //! its files deleted. `--keep` leaves it running; its name is in the output.
 
-use crate::{StartOpts, call, emit_inner, exit_code_for, log_response, opt, platform, start_quiet, stop_quiet, try_call, Instance};
+use crate::{StartOpts, call, error_object, emit_inner, exit_code_for, log_response, opt, platform, start_quiet, stop_quiet, try_call, Instance};
 use serde_json::{json, Map, Value};
 use signal_hook::consts::{SIGINT, SIGTERM};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -56,9 +56,7 @@ fn from_try(e: (i32, &'static str, String)) -> Fail {
 }
 
 fn fail_response(f: &Fail) -> Value {
-    let mut err = Map::new();
-    err.insert("code".into(), json!(f.error));
-    err.insert("message".into(), json!(f.message));
+    let mut err = error_object(f.error, &f.message);
     for (k, v) in &f.extra {
         err.insert(k.clone(), v.clone());
     }
@@ -117,6 +115,14 @@ fn add_run_info(resp: &mut Value, targets: &[String], expanded: Map<String, Valu
         extra.insert("expanded".into(), Value::Object(expanded));
     }
     merge_result(resp, extra);
+}
+
+/// `outcome` of a test run that took place: "passed" or "failed", as the exit code counts it (failures; skipped
+/// tests with `--skips-fail`). `ok: true` only says that the run happened.
+fn set_outcome(resp: &mut Value) {
+    if resp["ok"] == json!(true) && resp["result"]["ran"].is_number() {
+        resp["result"]["outcome"] = json!(if exit_code_for(resp) == 0 { "passed" } else { "failed" });
+    }
 }
 
 /// `--skips-fail`: skipped tests count as failures for the exit code (see `exit_code_for`).
@@ -217,9 +223,16 @@ pub fn expand_targets(targets: &[String], names: &TestNames) -> Result<(Vec<Stri
     Ok((out, expanded))
 }
 
-/// `--fresh` without targets: the packages the load added that end in -Tests.
-pub fn default_targets(added: &[String]) -> Vec<String> {
-    added.iter().filter(|p| p.ends_with("-Tests")).cloned().collect()
+/// `--fresh` without targets: the test packages of the baseline's group `Tests` (`tests_group` of the load: the
+/// group's loaded packages that define a TestCase subclass); for a baseline without such a group, or when none of
+/// its test packages was loaded, the packages the load added that end in -Tests. Answers the targets and where
+/// they come from.
+pub fn default_targets(tests_group: &Value, added: &[String]) -> (Vec<String>, &'static str) {
+    let from_group: Vec<String> = tests_group["test_packages"].as_array().map(|a| a.iter().filter_map(|p| p.as_str().map(String::from)).collect()).unwrap_or_default();
+    if !from_group.is_empty() {
+        return (from_group, "group Tests of the baseline");
+    }
+    (added.iter().filter(|p| p.ends_with("-Tests")).cloned().collect(), "packages the load added that end in -Tests")
 }
 
 /// Why a baseline load did not come out clean: it failed, or left names undeclared (code references a global that
@@ -304,6 +317,7 @@ pub fn test_run(inst: &Instance, targets: Vec<String>, opts: TestOpts, pretty: b
     let mut resp = call(inst, "test.run", test_args(&targets, &opts), test_read_timeout(opts.timeout), pretty);
     add_run_info(&mut resp, &targets, expanded);
     skips_note(&mut resp, opts.skips_fail);
+    set_outcome(&mut resp);
     let code = exit_code_for(&resp);
     exit_with(&resp, code, pretty)
 }
@@ -469,11 +483,18 @@ pub fn fresh_test_run(base: &Instance, spec: FreshSpec, targets: Vec<String>, op
         Some(before) => {
             let after = fresh_or_end(package_names(&inst), &inst, keep, &info, pretty);
             let added: Vec<String> = after.into_iter().filter(|p| !before.contains(p)).collect();
-            let found = default_targets(&added);
+            let tests_group = &load_resp["result"]["loaded"]["tests_group"];
+            let (found, source) = default_targets(tests_group, &added);
             if found.is_empty() {
-                let f = Fail::new(1, "no_tests_matched", "The load added no package ending in -Tests; give the targets to run".into());
+                let message = if tests_group.is_object() {
+                    "The baseline has a group Tests, but none of its test packages is loaded; add --group Tests (or the group that holds the tests), or give the targets to run"
+                } else {
+                    "The baseline has no group Tests and the load added no package ending in -Tests; give the targets to run"
+                };
+                let f = Fail::new(1, "no_tests_matched", message.into());
                 fresh_end(&inst, info, keep, 1, fail_response(&f), pretty);
             }
+            info.insert("targets_from".into(), json!(source));
             (found, Map::new())
         }
         None => fresh_or_end(resolve(&inst, &targets), &inst, keep, &info, pretty),
@@ -488,6 +509,7 @@ pub fn fresh_test_run(base: &Instance, spec: FreshSpec, targets: Vec<String>, op
     );
     add_run_info(&mut resp, &targets, expanded);
     skips_note(&mut resp, opts.skips_fail);
+    set_outcome(&mut resp);
     merge_result(&mut resp, info);
     let code = exit_code_for(&resp);
     end(&inst, keep, code, &resp, pretty)
@@ -568,10 +590,31 @@ mod tests {
     }
 
     #[test]
-    fn default_targets_are_the_added_test_packages() {
+    fn default_targets_are_the_tests_group_or_the_added_test_packages() {
         let added = strings(&["Orbit-Core", "Orbit-Core-Tests", "Orbit-Web-Tests", "Other-Tests-Support"]);
-        assert_eq!(default_targets(&added), strings(&["Orbit-Core-Tests", "Orbit-Web-Tests"]));
-        assert!(default_targets(&strings(&["Orbit"])).is_empty());
+        // no group Tests in the baseline: the suffix rule
+        assert_eq!(default_targets(&Value::Null, &added), (strings(&["Orbit-Core-Tests", "Orbit-Web-Tests"]), "packages the load added that end in -Tests"));
+        assert!(default_targets(&Value::Null, &strings(&["Orbit"])).0.is_empty());
+        // a group Tests: its loaded test packages, whatever they are called and whether or not this load added them
+        let group = json!({"packages": ["Orbit-Core", "Orbit-Checks"], "test_packages": ["Orbit-Checks"]});
+        assert_eq!(default_targets(&group, &added), (strings(&["Orbit-Checks"]), "group Tests of the baseline"));
+        // the group exists but none of its test packages is loaded: the suffix rule
+        let unloaded = json!({"packages": ["Orbit-Checks"], "test_packages": []});
+        assert_eq!(default_targets(&unloaded, &added).0, strings(&["Orbit-Core-Tests", "Orbit-Web-Tests"]));
+    }
+
+    #[test]
+    fn a_run_that_took_place_says_whether_it_passed() {
+        let mut green = json!({"ok": true, "result": {"ran": 3, "passed": 3, "failed": 0, "skipped": 0}});
+        set_outcome(&mut green);
+        assert_eq!(green["result"]["outcome"], "passed");
+        let mut red = json!({"ok": true, "result": {"ran": 3, "passed": 2, "failed": 1, "skipped": 0}});
+        set_outcome(&mut red);
+        assert_eq!((red["ok"].clone(), red["result"]["outcome"].clone()), (json!(true), json!("failed")));
+        // a run that did not happen has no outcome
+        let mut none = json!({"ok": false, "error": {"code": "no_tests_matched"}});
+        set_outcome(&mut none);
+        assert!(none["result"]["outcome"].is_null());
     }
 
     #[test]

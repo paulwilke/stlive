@@ -1,5 +1,38 @@
 # Changelog
 
+## 0.10.0 – clearer answers, safer save
+The meaning of `ok`, of the exit codes and of a plain `load` is unchanged; everything here adds fields, options or refusals that did not exist. Sources of this round: a review against Pharo 14's own command line, and what the Orbit, Kompass and SmalltalkPrep sessions ran into.
+
+**Answers**
+- **`test run` names its outcome**: `result.outcome` is `passed` or `failed`, as the exit code counts it (failures; skips with `--skips-fail`). `ok: true` keeps meaning "the run took place".
+- **The two timeouts can be told apart by a field.** The client giving up (`error.code: "timeout"`, exit 5) now carries `client_timeout: true` and `may_still_run: true`; the image interrupting code (`error.kind: "timeout"`, a debug session) carries `may_still_run: false`.
+- **`eval` marks an exception answered as a value**: `value_is_exception: true` and a `warning` when the code returns an exception object (for example from `on: Error do: [ :e | e ]`). `ok` stays true.
+- **`not_running` says where the instance is**: the state directory in which an instance of that name runs (every `.stlive` above the current directory, and the directories `start` has used, kept in `<home>/state-dirs.txt`), and the instances running in the directory that was searched.
+
+**eval**
+- `eval --file PATH` and `debug eval --file PATH` read the code from a file; without an argument the code is read from stdin (`-` still works).
+- `--print-limit N` / `STLIVE_PRINT_LIMIT=N` set how many characters of the value's printString `print` shows (default 120, as before).
+
+**save, drift, load**
+- **`save` detects conflicts and then writes nothing.** Per method it compares the source the image started from (the `old_source` of the first unsaved change), the image's current source and the file. A file that is neither was changed after the image read it: `save` fails with `save_conflict` (exit 1), lists method, file and problem, and leaves every file of every package untouched. `--dry-run` runs the same check. `save --force` writes anyway and reports `conflicts_overwritten`. Differences in whitespace alone are no conflict.
+- `save` plans all packages before it writes the first file, so an error in one package no longer leaves the others half written.
+- **`save` writes a changed superclass and trait composition** of an existing class. Before, they were dropped silently and `--verify` still reported agreement. A slot definition (`'x => SomeSlot'`) is kept when the variable names did not change.
+- **`drift` / `save --verify` compare class definitions** (superclass, trait composition, variable names) and report `definitions_different`. Each package report lists `compared` and `not_compared`. An image started by an older stlive sends no definitions; then `compared` lists only methods and names.
+- **`load --protect-unsaved`** refuses the load (`unsaved_changes`, nothing loaded) while the baseline's packages have unsaved changes in the image. Without the option the files win, as before.
+
+**test run --fresh**
+- Without targets it runs the test packages of the baseline's **group `Tests`** (its loaded packages that define a `TestCase` subclass, whatever their names). A baseline without the group, or a load without its test packages, keeps the old rule (added packages ending in `-Tests`). `result.targets_from` names the rule, `result.load.tests_group` the group; when the group exists but was not loaded, `no_tests_matched` says to add `--group Tests`.
+
+**Small things**
+- The server's epoch mixes in the clock, so an image restarted from the same snapshot does not come up with the epoch it had before (seen once on Linux with Pharo 13: a reference from before the restart was reported as `unknown_ref` instead of `stale_ref`).
+- `stlive ... | head` no longer ends in a Rust panic ("failed printing to stdout: Broken pipe"): SIGPIPE ends the process quietly.
+- `stlive list` is an alias of `stlive instances`.
+- **`stop` without `--force` stops an instance that has nothing to lose**: no suspended debug session, no unsaved recorded change, no object reference (`status` reports all three; `unsaved_changes` is new there). Otherwise it refuses as before (`confirmation_required`, exit 2), now naming what would be lost (`error.would_lose`) and the complete command to run. State stlive cannot see (objects held only by the image's globals, a server running inside it) is not counted; an image somebody evaluated in has object references and still needs `--force`. An instance started by an older stlive always needs `--force`.
+- **A hint for the class-definition messages of older Pharo versions**: when a class does not understand `subclass:instanceVariableNames:classVariableNames:package:` or one of its relatives, the error carries a `hint` with the fluid builder (`Object << #Foo slots: { … }; package: '…'; install`) and `stlive class create`.
+- The comment on `--no-quit` in `src/init.rs` was wrong: Pharo 13's `st` keeps the image running by default and ignores the flag. The flag stays until a start without it is tested on Pharo 13.
+
+**Not in this release**: step into / step over for debug sessions. A session can only be parked where an error occurred, and a step would run in the request process without a watchdog; both need solving first.
+
 ## 0.9.0 – Pharo 13 and Pharo 14 with one binary
 - **The Pharo version is detected and remembered.** Template configs (`config.json`, `config-N.json`) and instance configs carry `"pharo": N`. A config without the key (every home made by 0.8.x) is detected when needed from the `PharoNN.x-….sources` file next to the image or the VM, else from `printVersion --release`; it is never assumed. `status`, `image info`, the `start` result (`pharo_major`) and `instances` report it.
 - **Launch arguments follow the version.** Pharo 14 replaced the command-line handlers (Clap): `st script.st --no-quit` fails there, and `st` keeps the image running by default. `start` (headless and `--gui`) therefore runs `st serve.st --no-quit` before Pharo 14 and `st serve.st` from 14 on. `run` (`--quit`) and the init scripts (which end with `snapshot:andQuit:`) work on both.

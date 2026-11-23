@@ -112,8 +112,11 @@ StLiveServer class >> shutDown: isImageQuitting [
 
 { #category : 'instance creation' }
 StLiveServer class >> newEpoch [
+	"Three hex digits that differ from start to start. The clock is mixed in: an image restarted from the same
+	snapshot can come up with the same random state, and an equal epoch would make an old reference look unknown
+	instead of stale."
 	| s |
-	s := (((1 to: 4095) atRandom) printStringBase: 16) asLowercase.
+	s := ((((1 to: 4095) atRandom + Time microsecondClockValue) \\ 4095 + 1) printStringBase: 16) asLowercase.
 	^ ('000' , s) last: 3
 ]
 
