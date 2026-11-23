@@ -384,8 +384,8 @@ enum TestCmd {
     List { pattern: Option<String>, #[arg(long)] limit: Option<u64> },
     /// Run tests: classes, packages, 'Class>>selector' or glob patterns (`*`, `?`); --fresh runs them in a new image
     Run {
-        /// Targets, e.g. 'Orbit-*-Tests' Other-Tests 'Foo>>testBar'. With --fresh, the default is every package the
-        /// load added that ends in -Tests
+        /// Targets, e.g. 'Orbit-*-Tests' Other-Tests 'Foo>>testBar'. With --fresh, the default is the test packages
+        /// of the baseline's group Tests; without such a group, every package the load added that ends in -Tests
         targets: Vec<String>,
         /// Milliseconds per test
         #[arg(long)]

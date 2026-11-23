@@ -108,7 +108,7 @@ The 0.8.0 changelog records 203 headless E2E checks, 150 server SUnit tests and 
 
 - No single-stepping yet; resume, restart, return and rerun are available.
 - Direct VM stdout/stderr writes are not captured in live evaluation results; Transcript is captured.
-- Existing superclass and trait-composition changes are not rewritten by `save`; inspect structural source changes carefully.
+- Removing or renaming a class, moving it to another package and changing a method's protocol are not recorded, so `save` does not write them; change the files yourself and check with `drift`.
 - `eval`-compiled source can retain LF line endings; Tonel loads and `method compile` use Pharo's CR convention. Build LF explicitly for protocols that require it.
 - Deep stacks are walked up to 100,000 frames; recursion summaries do not necessarily locate the initial call.
 - Headless background exceptions are logged and end the failing process. GUI background errors can still open Pharo's debugger.

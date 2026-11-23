@@ -850,7 +850,7 @@ Run tests: classes, packages, 'Class>>selector' or glob patterns (`*`, `?`); --f
 Usage: stlive test run [OPTIONS] [TARGETS]...
 
 Arguments:
-  [TARGETS]...  Targets, e.g. 'Orbit-*-Tests' Other-Tests 'Foo>>testBar'. With --fresh, the default is every package the load added that ends in -Tests
+  [TARGETS]...  Targets, e.g. 'Orbit-*-Tests' Other-Tests 'Foo>>testBar'. With --fresh, the default is the test packages of the baseline's group Tests; without such a group, every package the load added that ends in -Tests
 
 Options:
   -i, --instance <INSTANCE>          Instance name (several images can run side by side) [env: STLIVE_INSTANCE=] [default: default]

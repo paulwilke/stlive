@@ -53,7 +53,7 @@ A changed superclass or trait composition of an existing class is written to its
 
 Changes through `eval` or the IDE are recorded too. Save every affected package, including tests and extensions. `save --all --dir src --verify` is useful when the directory is intended to contain all recorded changes. `drift --all --dir src` checks loaded package folders and loaded packages listed by local baselines but missing from files. Neither command runs tests.
 
-`save` handles per-method Tonel changes, traits, extensions and removals. It does not rewrite a changed superclass or trait composition of an existing class. Inspect the diff and verify saved sources after structural changes.
+`save` handles per-method Tonel changes, traits, extensions, removals and changed class definitions (superclass, trait composition, variables, comment). Removing or renaming a class is not recorded: delete or rename its file yourself. Inspect the diff and verify saved sources after structural changes.
 
 ## Test the saved baseline in a separate image
 
