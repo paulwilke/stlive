@@ -41,6 +41,7 @@ const SOURCES: &[(&str, &str)] = &[
     ("StLive/StLiveErrorHandler.class.st", include_str!("../smalltalk/src/StLive/StLiveErrorHandler.class.st")),
     ("StLive/StLiveFailure.class.st", include_str!("../smalltalk/src/StLive/StLiveFailure.class.st")),
     ("StLive/StLiveJob.class.st", include_str!("../smalltalk/src/StLive/StLiveJob.class.st")),
+    ("StLive/StLiveJsonReader.class.st", include_str!("../smalltalk/src/StLive/StLiveJsonReader.class.st")),
     ("StLive/StLiveServer.class.st", include_str!("../smalltalk/src/StLive/StLiveServer.class.st")),
     ("StLive/StLiveSession.class.st", include_str!("../smalltalk/src/StLive/StLiveSession.class.st")),
     ("StLive/StLiveRun.class.st", include_str!("../smalltalk/src/StLive/StLiveRun.class.st")),

@@ -29,22 +29,26 @@ fn is_ident(s: &str) -> bool {
 /// Looks at `<dir>/*/*.st` (any package folder next to the target).
 fn detect_symbol_style(dir: &Path) -> bool {
     let mut folders: Vec<PathBuf> = vec![dir.to_path_buf()];
-    if let Ok(rd) = fs::read_dir(dir) {
-        folders.extend(rd.flatten().map(|e| e.path()).filter(|p| p.is_dir()));
-    }
+    folders.extend(sorted_entries(dir).into_iter().filter(|p| p.is_dir()));
     for folder in folders {
-        if let Ok(rd) = fs::read_dir(&folder) {
-            for e in rd.flatten() {
-                if e.path().to_string_lossy().ends_with(".class.st") {
-                    if let Ok(t) = fs::read_to_string(e.path()) {
-                        if t.contains("#name : #") { return true; }
-                        if t.contains("#name : '") { return false; }
-                    }
+        for path in sorted_entries(&folder) {
+            if path.to_string_lossy().ends_with(".class.st") {
+                if let Ok(t) = fs::read_to_string(&path) {
+                    if t.contains("#name : #") { return true; }
+                    if t.contains("#name : '") { return false; }
                 }
             }
         }
     }
     false
+}
+
+/// The entries of a directory sorted by name (none when it cannot be read). `read_dir` has no order of its own: on
+/// APFS it is hash-like, and results that depend on it would change from run to run.
+fn sorted_entries(dir: &Path) -> Vec<PathBuf> {
+    let mut paths: Vec<PathBuf> = fs::read_dir(dir).map(|rd| rd.flatten().map(|e| e.path()).collect()).unwrap_or_default();
+    paths.sort();
+    paths
 }
 
 fn sym(s: &str, symbol_style: bool) -> String {
@@ -482,13 +486,16 @@ pub fn plan(changes: &[Value], package: &str, dir: &Path, dry_run: bool) -> Resu
     let mut stats: BTreeMap<PathBuf, FileStats> = BTreeMap::new();
     let mut contents: BTreeMap<PathBuf, String> = BTreeMap::new();
 
-    let load = |path: &PathBuf, contents: &mut BTreeMap<PathBuf, String>| -> bool {
+    // Ok(false): no such file. A file that exists but cannot be read (not UTF-8, no permission) is an error: taking it
+    // for absent would replace it and lose its other methods.
+    let load = |path: &PathBuf, contents: &mut BTreeMap<PathBuf, String>| -> Result<bool, String> {
         if contents.contains_key(path) {
-            return contents.get(path).map(|_| true).unwrap();
+            return Ok(true);
         }
         match fs::read_to_string(path) {
-            Ok(t) => { contents.insert(path.clone(), t); true }
-            Err(_) => false,
+            Ok(t) => { contents.insert(path.clone(), t); Ok(true) }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
+            Err(e) => Err(format!("cannot read {}: {}", path.display(), e)),
         }
     };
 
@@ -514,7 +521,7 @@ pub fn plan(changes: &[Value], package: &str, dir: &Path, dry_run: bool) -> Resu
         let kind = if extension { "extension" } else if is_a_trait { "trait" } else { "class" };
         let file = pkg_dir.join(format!("{}.{}.st", class_name, kind));
         let header = if side == "class" { class_side_header(class_name, is_a_trait) } else { class_name.clone() };
-        let existed = load(&file, &mut contents);
+        let existed = load(&file, &mut contents)?;
         if !existed {
             let head = if extension {
                 format!("Extension {{ #name : {} }}\n", sym(class_name, symbol_style))
@@ -651,23 +658,20 @@ pub fn drift(image: &Value, package: &str, dir: &Path) -> Value {
     let mut file_classes: Vec<String> = Vec::new();
     let mut file_traits: Vec<String> = Vec::new();
     let mut file_definitions: BTreeMap<String, String> = BTreeMap::new();
-    if let Ok(rd) = fs::read_dir(&pkg_dir) {
-        for e in rd.flatten() {
-            let p = e.path();
-            let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("").to_string();
-            if name.ends_with(".class.st") { file_classes.push(name.trim_end_matches(".class.st").to_string()); }
-            if name.ends_with(".trait.st") { file_traits.push(name.trim_end_matches(".trait.st").to_string()); }
-            if name.ends_with(".class.st") || name.ends_with(".trait.st") || name.ends_with(".extension.st") {
-                if let Ok(t) = fs::read_to_string(&p) {
-                    if !name.ends_with(".extension.st") {
-                        if let Some((start, end)) = definition_span(&t) {
-                            file_definitions.insert(name.split('.').next().unwrap_or("").to_string(), t[start..end].to_string());
-                        }
+    for p in sorted_entries(&pkg_dir) {
+        let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("").to_string();
+        if name.ends_with(".class.st") { file_classes.push(name.trim_end_matches(".class.st").to_string()); }
+        if name.ends_with(".trait.st") { file_traits.push(name.trim_end_matches(".trait.st").to_string()); }
+        if name.ends_with(".class.st") || name.ends_with(".trait.st") || name.ends_with(".extension.st") {
+            if let Ok(t) = fs::read_to_string(&p) {
+                if !name.ends_with(".extension.st") {
+                    if let Some((start, end)) = definition_span(&t) {
+                        file_definitions.insert(name.split('.').next().unwrap_or("").to_string(), t[start..end].to_string());
                     }
-                    for m in parse_methods(&t) {
-                        let (cls, side) = split_header(&m.class_header);
-                        in_files.insert(format!("{}|{}|{}", cls, side, m.selector), m.source);
-                    }
+                }
+                for m in parse_methods(&t) {
+                    let (cls, side) = split_header(&m.class_header);
+                    in_files.insert(format!("{}|{}|{}", cls, side, m.selector), m.source);
                 }
             }
         }
@@ -1060,6 +1064,52 @@ mod tests {
             {"class": "DemoB", "side": "instance", "selector": "+", "source": "+ other\n\t^ other"},
             {"class": "DemoB", "side": "instance", "selector": "three", "source": "three\n\t^ [ 3 ] value"}]});
         assert_eq!(drift(&image, "Pkg", &dir)["ok"], json!(true));
+        let _ = fs::remove_dir_all(&dir);
+    }
+    #[test]
+    fn an_extension_file_that_is_not_utf8_fails_the_save_instead_of_being_replaced() {
+        let dir = tmp("extension-latin1");
+        let file = dir.join("Pkg/Object.extension.st");
+        // Latin-1: the 'ä' is the single byte 0xE4
+        let mut on_disk = b"Extension { #name : 'Object' }\n\n{ #category : '*Pkg' }\nObject >> keep [\n\t^ '".to_vec();
+        on_disk.push(0xE4);
+        on_disk.extend_from_slice(b"'\n]\n");
+        fs::write(&file, &on_disk).unwrap();
+        let change = json!({"index": 1, "kind": "method-compile", "class_name": "Object", "class_kind": "class", "class_package": "Kernel", "package": "Pkg", "side": "instance", "selector": "added", "protocol": "*Pkg", "new_source": "added\n\t^ 1"});
+        for dry_run in [true, false] {
+            let err = plan(std::slice::from_ref(&change), "Pkg", &dir, dry_run).err().expect("an unreadable extension file must fail the save");
+            assert!(err.contains("Object.extension.st"), "{}", err);
+            assert_eq!(fs::read(&file).unwrap(), on_disk); // left as it was
+        }
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_symbol_style_is_taken_from_the_first_package_folder_by_name() {
+        let dir = tmp("style-order");
+        let _ = fs::remove_dir_all(dir.join("Pkg"));
+        // one folder in symbol style, many in string style: the first by name decides
+        fs::create_dir_all(dir.join("A")).unwrap();
+        fs::write(dir.join("A/X.class.st"), "Class {\n\t#name : #X,\n\t#superclass : #Object,\n\t#category : #A\n}\n").unwrap();
+        for i in 0..30 {
+            let f = dir.join(format!("B{:02}", i));
+            fs::create_dir_all(&f).unwrap();
+            fs::write(f.join("Y.class.st"), "Class {\n\t#name : 'Y',\n\t#superclass : 'Object',\n\t#package : 'B'\n}\n").unwrap();
+        }
+        assert!(detect_symbol_style(&dir));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn drift_lists_names_in_order() {
+        let dir = tmp("drift-order");
+        let names: Vec<String> = (0..30).map(|i| format!("C{:02}", i)).collect();
+        for n in &names {
+            fs::write(dir.join(format!("Pkg/{}.class.st", n)), format!("Class {{\n\t#name : '{}',\n\t#superclass : 'Object',\n\t#package : 'Pkg'\n}}\n", n)).unwrap();
+        }
+        let report = drift(&json!({"classes": [], "traits": [], "methods": []}), "Pkg", &dir);
+        let missing: Vec<String> = report["classes_missing_in_image"].as_array().unwrap().iter().map(|v| v.as_str().unwrap().to_string()).collect();
+        assert_eq!(missing, names);
         let _ = fs::remove_dir_all(&dir);
     }
 }

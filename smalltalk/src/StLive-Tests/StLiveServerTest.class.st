@@ -259,3 +259,124 @@ StLiveServerTest >> testAcceptLoopEndsInAnotherSession [
 	server instVarNamed: 'acceptor' put: nil.
 	socket closeAndDestroy
 ]
+
+{ #category : 'helpers' }
+StLiveServerTest >> answerOverSocketOf: aString [
+	"Sends aString and a line feed through a real connection to serve: and answers the reply line, parsed."
+	| listener client accepted stream reply |
+	listener := Socket newTCP.
+	"a backlog of 1 is the VM's single-connection mode, in which accept fails"
+	[ listener listenOn: 0 backlogSize: 4 interface: #[ 127 0 0 1 ].
+	client := Socket newTCP.
+	client connectTo: #[ 127 0 0 1 ] port: listener localPort.
+	accepted := listener waitForAcceptFor: 5.
+	self assert: accepted notNil.
+	[ server serve: accepted ] fork.
+	stream := SocketStream on: client.
+	stream binary; timeout: 30.
+	stream nextPutAll: aString utf8Encoded; nextPut: 10; flush.
+	reply := stream upTo: 10 limit: nil ]
+		ensure: [
+			client ifNotNil: [ client closeAndDestroy ].
+			listener closeAndDestroy ].
+	^ STON fromString: reply utf8Decoded
+]
+
+{ #category : 'helpers' }
+StLiveServerTest >> fakeListenerReturningAfter: milliseconds [
+	"An object that answers waitForAcceptFor: like a listener without clients: nil after the given time. It remembers
+	when it returned (returnedAt)."
+	| cls fake |
+	self rememberPackage: 'StLive-Fixture'.
+	cls := self quietly: [
+		self class classInstaller make: [ :builder |
+			builder superclass: Object; name: #StLiveFakeListener; slots: #( wait returnedAt ); package: 'StLive-Fixture' ] ].
+	fixtureClasses add: cls.
+	self compile: 'waitForAcceptFor: seconds
+	(Delay forMilliseconds: wait) wait.
+	returnedAt := Time millisecondClockValue.
+	^ nil' in: cls.
+	self compile: 'returnedAt
+	^ returnedAt' in: cls.
+	fake := cls new.
+	fake instVarNamed: 'wait' put: milliseconds.
+	^ fake
+]
+
+{ #category : 'transport' }
+StLiveServerTest >> testARequestOverAHundredKilobytesIsServed [
+	| response |
+	response := self answerOverSocketOf: '{"cmd":"ping","padding":"' , (String new: 300000 withAll: $a) , '"}'.
+	self assert: (response at: 'ok').
+	self assert: (response at: 'epoch') equals: server epoch
+]
+
+{ #category : 'transport' }
+StLiveServerTest >> testARequestOverTheLimitIsAnsweredWithAnError [
+	| cls response |
+	cls := self fixtureClassNamed: #StLiveSmallServer superclass: StLiveServer package: 'StLive-Fixture'.
+	self compile: 'maxRequestBytes
+	^ 1000' in: cls.
+	server := cls new.
+	response := self answerOverSocketOf: '{"cmd":"ping","padding":"' , (String new: 5000 withAll: $a) , '"}'.
+	self deny: (response at: 'ok').
+	self assert: ((response at: 'error') at: 'code') equals: 'request_too_large'
+]
+
+{ #category : 'transport' }
+StLiveServerTest >> testAcceptWaitsAgainAtOnceAfterATimeout [
+	"A client that connects right after the listener's timeout must not wait for a pause of the loop."
+	| fake |
+	fake := self fakeListenerReturningAfter: 1000.
+	self assert: (server acceptFrom: fake) isNil.
+	self assert: Time millisecondClockValue - fake returnedAt < 5
+]
+
+{ #category : 'transport' }
+StLiveServerTest >> testAcceptPausesWhenTheListenerAnswersAtOnce [
+	"A listener that returns before its timeout would make the loop spin."
+	| fake |
+	fake := self fakeListenerReturningAfter: 0.
+	self assert: (server acceptFrom: fake) isNil.
+	self assert: Time millisecondClockValue - fake returnedAt >= 9
+]
+
+{ #category : 'lines' }
+StLiveServerTest >> testRequestsAreParsedAsJson [
+	| request |
+	request := server parseRequest: '{"cmd":"x","a":[1,2.5,null,true,"ä"],"m":{"k":false}}'.
+	self assert: (request at: 'cmd') equals: 'x'.
+	self assert: (request at: 'a') equals: #( 1 2.5 nil true 'ä' ).
+	self assert: ((request at: 'm') at: 'k') equals: false
+]
+
+{ #category : 'lines' }
+StLiveServerTest >> testARequestCannotCreateObjectsOfImageClasses [
+	| response |
+	response := self answerOf: '{"cmd":"ping","x":Point[1,2]}'.
+	self deny: (response at: 'ok').
+	self assert: ((response at: 'error') at: 'code') equals: 'bad_request'.
+	response := self answerOf: '{"cmd":"ping","x":ZnUrl{#scheme:#file,#segments:[''etc'',''passwd'']}}'.
+	self deny: (response at: 'ok').
+	self assert: ((response at: 'error') at: 'code') equals: 'bad_request'
+]
+
+{ #category : 'epoch' }
+StLiveServerTest >> testStartUpOfASavedImageRenewsTheEpoch [
+	"An image started from a snapshot (or a copy of it) is a new run: references of the earlier run must be stale."
+	| before ref |
+	before := server epoch.
+	ref := server refFor: Object new.
+	server startUp: true.
+	self deny: server epoch equals: before.
+	self assert: ((self failureOf: [ server objectFor: ref ]) code) equals: 'stale_ref'
+]
+
+{ #category : 'epoch' }
+StLiveServerTest >> testStartUpAfterASaveKeepsTheEpoch [
+	| before |
+	before := server epoch.
+	server instVarNamed: 'running' put: false.
+	server startUp: false.
+	self assert: server epoch equals: before
+]

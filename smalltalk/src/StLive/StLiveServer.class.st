@@ -459,12 +459,20 @@ StLiveServer >> acceptLoop [
 		and: [ listener notNil
 		and: [ listener isValid
 		and: [ Smalltalk session == mySession ] ] ] ] ] whileTrue: [
-		| socket client |
-		socket := listener.
-		client := socket waitForAcceptFor: 1.
-		client
-			ifNil: [ (Delay forMilliseconds: 10) wait ]
-			ifNotNil: [ self startConnectionFor: client ] ]
+		(self acceptFrom: listener) ifNotNil: [ :client | self startConnectionFor: client ] ]
+]
+
+{ #category : 'transport' }
+StLiveServer >> acceptFrom: aListener [
+	"The next client, or nil after a second without one. After a real timeout the loop waits again at once: a pause
+	there would hold up a client that connects in it. Only a listener that answers nil early (a socket in trouble) is
+	followed by a pause of 10 ms, so that the loop cannot spin."
+	| start client |
+	start := Time millisecondClockValue.
+	client := aListener waitForAcceptFor: 1.
+	(client isNil and: [ Time millisecondClockValue - start < 900 ])
+		ifTrue: [ (Delay forMilliseconds: 10) wait ].
+	^ client
 ]
 
 { #category : 'transport' }
@@ -488,8 +496,10 @@ StLiveServer >> serve: aSocket [
 	[ stream := SocketStream on: aSocket.
 	stream binary.
 	stream timeout: 30.
-	[ line := stream upTo: 10.
-	response := self handleLine: line utf8Decoded.
+	[ line := stream upTo: 10 limit: self maxRequestBytes.
+	response := line size > self maxRequestBytes
+		ifTrue: [ self requestTooLarge: line size ]
+		ifFalse: [ self handleLine: line utf8Decoded ].
 	stream nextPutAll: response utf8Encoded; nextPut: 10; flush ]
 		on: Error
 		do: [ :e |
@@ -500,6 +510,26 @@ StLiveServer >> serve: aSocket [
 	[ stream close ] on: Error do: [ :e | nil ].
 	aSocket closeAndDestroy ]
 		ensure: [ self connectionProcesses remove: Processor activeProcess ifAbsent: [ nil ] ]
+]
+
+{ #category : 'transport' }
+StLiveServer >> maxRequestBytes [
+	"Longest request line read (64 MB). SocketStream>>upTo: alone stops at 100 000 bytes and answers the part read,
+	which cut larger requests (an eval of a big file) into invalid JSON."
+	^ 64 * 1024 * 1024
+]
+
+{ #category : 'transport' }
+StLiveServer >> requestTooLarge: aSize [
+	"The answer to a request longer than maxRequestBytes. Its rest is not read: the connection is closed after it."
+	^ STON toJsonString: (OrderedDictionary new
+		at: 'ok' put: false;
+		at: 'epoch' put: epoch;
+		at: 'error' put: (OrderedDictionary new
+			at: 'code' put: 'request_too_large';
+			at: 'message' put: 'The request is longer than ' , self maxRequestBytes printString , ' bytes (read so far: ' , aSize printString , ')';
+			yourself);
+		yourself)
 ]
 
 { #category : 'session hooks' }
@@ -529,7 +559,7 @@ StLiveServer >> shutDown: isImageQuitting [
 
 { #category : 'session hooks' }
 StLiveServer >> forgetEarlierSession [
-	"Drops what the earlier session left: the listener, the acceptor and the connections. Nothing is closed or
+	"Drops what the earlier session left: the listener, the acceptor and the connections, and starts a new epoch. Nothing is closed or
 	terminated here. Terminating a process restored from the snapshot hangs the start (measured on Pharo 13.1); the
 	dropped processes end by themselves: a socket of the earlier session is gone, so each one answers into an error
 	(logged as a connection error) and finishes. An acceptor of the earlier session exits at its next check, because
@@ -537,7 +567,17 @@ StLiveServer >> forgetEarlierSession [
 	running := false.
 	acceptor := nil.
 	listener := nil.
-	self connectionProcesses removeAll
+	self connectionProcesses removeAll.
+	self renewEpoch
+]
+
+{ #category : 'session hooks' }
+StLiveServer >> renewEpoch [
+	"A start from a saved image (or a copy of it) is a new run: references handed out before must be stale, so the
+	epoch differs from the one saved."
+	| old |
+	old := epoch.
+	[ epoch = old ] whileTrue: [ epoch := self class newEpoch ]
 ]
 
 { #category : 'transport' }
@@ -574,7 +614,7 @@ StLiveServer >> internalError: e [
 { #category : 'transport' }
 StLiveServer >> handleLine: aString [
 	| request response |
-	response := [ [ [ request := STON fromString: aString. commands dispatch: request ]
+	response := [ [ [ request := self parseRequest: aString. commands dispatch: request ]
 		on: StLiveFailure do: [ :f |
 			OrderedDictionary new at: 'ok' put: false; at: 'error' put: f asError; yourself ] ]
 		on: Error do: [ :e | self internalError: e ] ]
@@ -586,6 +626,13 @@ StLiveServer >> handleLine: aString [
 			at: 'epoch' put: epoch;
 			at: 'error' put: (OrderedDictionary new at: 'code' put: 'serialization_error'; at: 'message' put: e messageText asString; yourself);
 			yourself) ]
+]
+
+{ #category : 'transport' }
+StLiveServer >> parseRequest: aString [
+	"A request is JSON. STON's reader is used with its class lookup turned off: plain STON fromString: would build an
+	instance of any class of the image that a request names (ZnUrl{...}, FileReference{...})."
+	^ (StLiveJsonReader on: aString readStream) next
 ]
 
 { #category : 'recording' }

@@ -1,5 +1,18 @@
 # Changelog
 
+## Unreleased – fixes
+Six bugs found while porting stlive to an experimental pure-Pharo client and fuzzing both against each other. Each has a test that failed before the fix.
+
+**Server**
+- **Requests over 100 kB are served.** `serve:` read the request line with `SocketStream>>upTo:`, which stops at 100 000 bytes and answers the part read: `eval --file` with a large file ended in `connection_lost`. Requests may now be up to 64 MB; a longer one is answered with `request_too_large`.
+- **No extra wait after the acceptor's timeout.** The acceptor paused 10 ms after every 1 s accept timeout, so a request arriving in that pause waited for it (p50 4.9 ms against 0.5 ms now for requests one second apart). The pause is kept only when the listener answers before its timeout, so the loop still cannot spin.
+- **Requests are parsed as JSON only.** `STON fromString:` built instances of any class a request named (`Point[1,2]`, `ZnUrl{…}`, `FileReference{…}`). A class tag in a request is now refused with `bad_request`.
+- **A restarted image gets a new epoch.** The epoch was set only when the server was created, so an image started from a snapshot (or a copy of it) kept the epoch of the run that saved it, and references from that run did not report `stale_ref`. The epoch is now renewed at every start from a saved image; a snapshot within a running session keeps it.
+
+**save, drift**
+- **An extension file that cannot be read fails the save** (`save_failed`, nothing written). A `*.extension.st` that is not valid UTF-8 (for example Latin-1) was taken for absent and replaced by a fresh `Extension { … }` file, losing its other methods.
+- **Directory order no longer changes results.** `save` (style of new files in a repository that mixes symbol and string style) and `drift` (order of `classes_missing_in_image`, which definition wins when `Foo.class.st` and `Foo.trait.st` both exist) read directories in the file system's order, which on APFS is hash-like. Entries are now sorted by name.
+
 ## 0.10.0 – clearer answers, safer save
 The meaning of `ok`, of the exit codes and of a plain `load` is unchanged; everything here adds fields, options or refusals that did not exist. Sources of this round: a review against Pharo 14's own command line, and what agents working in three projects ran into.
 
