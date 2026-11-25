@@ -1077,7 +1077,7 @@ mod tests {
         fs::write(&file, &on_disk).unwrap();
         let change = json!({"index": 1, "kind": "method-compile", "class_name": "Object", "class_kind": "class", "class_package": "Kernel", "package": "Pkg", "side": "instance", "selector": "added", "protocol": "*Pkg", "new_source": "added\n\t^ 1"});
         for dry_run in [true, false] {
-            let err = plan(&[change.clone()], "Pkg", &dir, dry_run).err().expect("an unreadable extension file must fail the save");
+            let err = plan(std::slice::from_ref(&change), "Pkg", &dir, dry_run).err().expect("an unreadable extension file must fail the save");
             assert!(err.contains("Object.extension.st"), "{}", err);
             assert_eq!(fs::read(&file).unwrap(), on_disk); // left as it was
         }
